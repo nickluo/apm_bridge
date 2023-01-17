@@ -4,11 +4,14 @@
 
 #include <std_msgs/Float64.h>
 #include <quadrotor_msgs/ControlCommand.h>
+#include <quadrotor_msgs/LowLevelFeedback.h>
 #include <mavros_msgs/AttitudeTarget.h>
 #include <mavros_msgs/ExtendedState.h>
 #include <mavros_msgs/State.h>
 #include <mavros_msgs/MessageInterval.h>
+#include <sensor_msgs/BatteryState.h>
 #include <sensor_msgs/FluidPressure.h>
+#include <sensor_msgs/Temperature.h>
 #include <sensor_msgs/Imu.h>
 
 #include <tf2_ros/static_transform_broadcaster.h>
@@ -36,6 +39,10 @@ namespace apm_bridge
     private:
         const double tsc_1_div_freq = 1000000.0 / DEFAULT_TSC_FREQ;
 
+        static constexpr double kBatteryLowVoltagePerCell = 3.6;
+        static constexpr double kBatteryCriticalVoltagePerCell = 3.4;
+        static constexpr double kBatteryInvalidVoltagePerCell = 3.0;
+
         ros::NodeHandle nh;
         bool sync_running = true;
         std::thread sync_worker;
@@ -49,20 +56,23 @@ namespace apm_bridge
         tf2::Vector3 v1;
 
         ros::Publisher target_pub;
+        ros::Publisher ap_feedback_pub;
 
         ros::Subscriber control_command_sub;
         ros::Subscriber control_command_raw_sub;
         ros::Subscriber atm_sub;
+        ros::Subscriber temp_sub;
         ros::Subscriber imu_sub;
         ros::Subscriber ext_state_sub;
         ros::Subscriber state_sub;
         ros::Subscriber atti_target_sub;
+        ros::Subscriber battery_sub;
 
         // ros::ServiceClient set_message_interval;
 
-        std::string frame_id_base_link;
-        std::string frame_id_axis;
-        std::string frame_id_lio;
+        // std::string frame_id_base_link;
+        // std::string frame_id_axis;
+        // std::string frame_id_lio;
         
         quadratic_thrust_model::MotorParams motor_params;
 
@@ -73,14 +83,22 @@ namespace apm_bridge
         double temp = 15.0;
         double baro = 101325.0;
 
+        int n_lipo_cells;
+
         double collective_force;
         double mass;
         uint8_t hoverable = 0; // 0: n/a 1: internal 2: external
 
-        std::vector<double> ex_i_a;
-        std::vector<double> ex_a_v;
+        // std::vector<double> ex_r_i_a;
+        // std::vector<double> ex_r_a_v;
+        // std::vector<double> ex_t_i_a;
+        // std::vector<double> ex_t_a_v;
 
         uint8_t landed_state = 0;
+        bool use_rate = false;
+        bool rc_manual = true;
+        bool voltage_compensation = false;
+        double battery_voltage = 0;
 
         EMAFilter<5> ema;
         
@@ -90,9 +108,12 @@ namespace apm_bridge
         void ctrlCommandCallback(const quadrotor_msgs::ControlCommandConstPtr &command);
         void attiTargetCallback(const mavros_msgs::AttitudeTargetConstPtr &att);
         void atmPressureCallback(const sensor_msgs::FluidPressureConstPtr &val);
+        void tempCallback(const sensor_msgs::TemperatureConstPtr &val);
         void imuCallback(const sensor_msgs::ImuConstPtr &val);
         void extStateCallback(const mavros_msgs::ExtendedStateConstPtr &state);
         void stateCallback(const mavros_msgs::StateConstPtr &state);
+        void batteryCallback(const sensor_msgs::BatteryStateConstPtr &state);
+
     };
 }
 

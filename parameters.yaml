@@ -1,18 +1,22 @@
-serial_name: "/dev/ttyTHS0"
-baud_rate: 1000000
+# extrinsic_R_IinA: [ 1, 0, 0, 0, 1, 0, 0, 0, 1 ]
+# extrinsic_R_AinV: [ 1, 0, 0, 0, 1, 0, 0, 0, 1 ]
+# extrinsic_T_IinA: [ 0, 0, 0 ]
+# extrinsic_T_AinV: [ 0, 0, 0 ]
 
-extrinsic_IinA: [ 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0]
-extrinsic_AinV: [ 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0]
-
-base_link_frame: "base_link"
-axis_frame: "axis_link"
-lio_frame: "lio_link"
+# base_link_frame: "base_link"
+# axis_frame: "axis_link"
+# lio_frame: "lio_link"
 
 gravity_const: 9.801
 mass: 9.0
+
+lipo_cells: 6
+voltage_compensation: false
 
 motor_parameters:
   a: -0.10968415365433701
   b: 1.51403837029178
   c: 202.59783128083356
   n: 1
+  voltage_a: 0.0
+  voltage_b: 0.0
