@@ -28,5 +28,6 @@
 	  <remap from="~low_level_feedback" to="/m300/low_level_feedback" />
 	  <remap from="~control_command" to="/m300/control_command" />
 	  <remap from="~control_command_raw" to="/m300/control_command_raw" />
+	  <remap from="~arm" to="/m300/bridge/arm" />
     </node>
 </launch>

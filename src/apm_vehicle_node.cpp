@@ -8,6 +8,11 @@
 
 #include <mavlink/v2.0/ardupilotmega/ardupilotmega.hpp>
 
+#include <mavros_msgs/CommandBool.h>
+
+#include <geographic_msgs/GeoPointStamped.h>
+#include <mavros_msgs/CommandHome.h>
+
 using namespace apm_bridge;
 
 namespace mavlink_msg = mavlink::common::msg;
@@ -57,20 +62,54 @@ VehicleNode::VehicleNode(ros::NodeHandle &handle)
 
     // tf_br_static.sendTransform(tf_axis2base);
 
-    control_command_sub = nh.subscribe("control_command", 10, &VehicleNode::ctrlCommandCallback, this);
-    control_command_raw_sub = nh.subscribe("control_command_raw", 10, &VehicleNode::ctrlCommandRawCallback, this);
+    nh.setCallbackQueue(&queue_control);
+    control_command_sub = nh.subscribe("control_command", 10, &VehicleNode::ctrlCommandCallback, this, ros::TransportHints().tcpNoDelay());
+    control_command_raw_sub = nh.subscribe("control_command_raw", 10, &VehicleNode::ctrlCommandRawCallback, this, ros::TransportHints().tcpNoDelay());
+    
+    nh.setCallbackQueue(&queue_fast);
+    imu_sub = nh.subscribe("/mavros/imu/data", 10, &VehicleNode::imuCallback, this, ros::TransportHints().tcpNoDelay());
+    atti_target_sub = nh.subscribe("/mavros/setpoint_raw/target_attitude", 10, &VehicleNode::attiTargetCallback, this, ros::TransportHints().tcpNoDelay());
+
+    nh.setCallbackQueue(&queue_slow);
+    arm_interface_sub = nh.subscribe("arm", 1, &VehicleNode::armCallback, this);
     atm_sub = nh.subscribe("/mavros/imu/static_pressure", 10, &VehicleNode::atmPressureCallback, this);
     temp_sub = nh.subscribe("/mavros/imu/temperature_baro", 10, &VehicleNode::tempCallback, this);
-    imu_sub = nh.subscribe("/mavros/imu/data", 10, &VehicleNode::imuCallback, this);
     ext_state_sub = nh.subscribe("/mavros/extended_state", 10, &VehicleNode::extStateCallback, this);
     state_sub = nh.subscribe("/mavros/state", 10, &VehicleNode::stateCallback, this);
-    atti_target_sub = nh.subscribe("/mavros/setpoint_raw/target_attitude", 10, &VehicleNode::attiTargetCallback, this);
     battery_sub = nh.subscribe("/mavros/battery", 10, &VehicleNode::batteryCallback, this);
 
     target_pub = nh.advertise<mavros_msgs::AttitudeTarget>("/mavros/setpoint_raw/attitude", 10);
     ap_feedback_pub = nh.advertise<quadrotor_msgs::LowLevelFeedback>("low_level_feedback", 10);
 
+    command_arming = nh.serviceClient<mavros_msgs::CommandBool>("/mavros/cmd/arming");
+    command_arming.waitForExistence();
+
     setupMavlink();
+
+    sync_worker = std::thread([this]() {
+        auto set_global_pos_pub = nh.advertise<geographic_msgs::GeoPointStamped>("/mavros/global_position/set_gp_origin", 1, true);
+        geographic_msgs::GeoPointStamped pos;
+        nh.param("init_position/altitude", pos.position.altitude, 100.0);
+        nh.param("init_position/latitude", pos.position.latitude, 0.0);
+        nh.param("init_position/longitude", pos.position.longitude, 0.0);
+
+        while (sync_running && set_global_pos_pub.getNumSubscribers() == 0)
+            ros::Duration(1.0).sleep();
+
+        if (sync_running)
+        {
+            set_global_pos_pub.publish(pos);
+        
+            auto command_set_home = nh.serviceClient<mavros_msgs::CommandHome>("/mavros/cmd/set_home");
+            mavros_msgs::CommandHome params;
+            params.request.current_gps = 0;
+            params.request.yaw = 0;
+            params.request.altitude = pos.position.altitude;
+            params.request.latitude = pos.position.latitude;
+            params.request.longitude = pos.position.longitude;
+            command_set_home.call(params);
+        }
+    });
 
     // sync_worker = std::thread([this]()
     // {
@@ -140,6 +179,17 @@ VehicleNode::VehicleNode(ros::NodeHandle &handle)
     //     } });
 }
 
+void VehicleNode::Spin()
+{
+    ros::AsyncSpinner spinner1(1, &queue_control);
+    ros::AsyncSpinner spinner2(1, &queue_fast);
+    ros::AsyncSpinner spinner3(1, &queue_slow);
+    spinner1.start();
+    spinner2.start();
+    spinner3.start();
+    ros::waitForShutdown();
+}
+
 VehicleNode::~VehicleNode()
 {
     sync_running = false;
@@ -179,6 +229,8 @@ void VehicleNode::extStateCallback(const mavros_msgs::ExtendedStateConstPtr &sta
 
 void VehicleNode::stateCallback(const mavros_msgs::StateConstPtr &state)
 {
+    armed.store(state->armed);
+
     mavlink::minimal::MAV_STATE current_status{state->system_status};
     if (current_status == mavlink::minimal::MAV_STATE::ACTIVE)
     {
@@ -205,7 +257,7 @@ void VehicleNode::stateCallback(const mavros_msgs::StateConstPtr &state)
 
 void VehicleNode::attiTargetCallback(const mavros_msgs::AttitudeTargetConstPtr &att)
 {
-    if (hoverable == 1) // in Loiter or PosHold mode
+    if (hoverable < 2) // not in GUIDED or GUIDED_NOGPS mode
     {
         std::lock_guard<std::mutex> lk(mtx_kp);
         if (voltage_compensation)
@@ -215,24 +267,34 @@ void VehicleNode::attiTargetCallback(const mavros_msgs::AttitudeTargetConstPtr &
     }
 }
 
+void VehicleNode::armCallback(const std_msgs::Bool::ConstPtr& msg) 
+{
+    mavros_msgs::CommandBool param;
+    param.request.value = msg->data;
+    command_arming.call(param);
+}
+
 void VehicleNode::imuCallback(const sensor_msgs::ImuConstPtr &val)
 {
     static uint8_t last_state = mavros_msgs::ExtendedState::LANDED_STATE_UNDEFINED;
+    static double gravity_acc = gravity;
 
-    if (last_state != landed_state)
+    auto current_state = landed_state.load();
+    if (last_state != current_state)
     {
-        last_state = landed_state;
+        last_state = current_state;
         ema.reset();
     }
 
-    if (landed_state == mavros_msgs::ExtendedState::LANDED_STATE_ON_GROUND) // Update g value
+    if (current_state == mavros_msgs::ExtendedState::LANDED_STATE_ON_GROUND || !armed.load()) // Update g value
     {
         auto acc = std::sqrt(val->linear_acceleration.x * val->linear_acceleration.x +
                              val->linear_acceleration.y * val->linear_acceleration.y +
                              val->linear_acceleration.z * val->linear_acceleration.z);
-        gravity = ema.filter(acc, 2);
+        gravity_acc = ema.filter(acc, 2);
+        // printf("gravity updated : %f\n", gravity);
     }
-    else if (landed_state == mavros_msgs::ExtendedState::LANDED_STATE_IN_AIR) // Update mass when hovering
+    else if (current_state == mavros_msgs::ExtendedState::LANDED_STATE_IN_AIR) // Update mass when hovering
     {
         auto r_roll = ema.filter(val->angular_velocity.x, 0);
         auto r_pitch = ema.filter(val->angular_velocity.y, 1);
@@ -242,12 +304,13 @@ void VehicleNode::imuCallback(const sensor_msgs::ImuConstPtr &val)
         double roll, pitch, yaw;
         mat.getRPY(roll, pitch, yaw);
         tf2::Vector3 acc;
-        acc.setY(val->linear_acceleration.y - std::sin(roll) * std::cos(pitch) * gravity);
-        acc.setZ(val->linear_acceleration.z - std::cos(roll) * std::cos(pitch) * gravity);
-        acc.setX(val->linear_acceleration.x + std::sin(pitch) * gravity);
+        acc.setY(val->linear_acceleration.y - std::sin(roll) * std::cos(pitch) * gravity_acc);
+        acc.setZ(val->linear_acceleration.z - std::cos(roll) * std::cos(pitch) * gravity_acc);
+        acc.setX(val->linear_acceleration.x + std::sin(pitch) * gravity_acc);
 
         if (std::fabs(r_roll) < 0.1 && std::fabs(r_pitch) < 0.1 && ema.filter(acc.length2(), 4) < 0.01) // if hovering
         {
+            std::lock_guard<std::mutex> lk(mtx_kp);
             mass = ema.filter(collective_force / gravity, 3);
         }
     }
@@ -255,7 +318,7 @@ void VehicleNode::imuCallback(const sensor_msgs::ImuConstPtr &val)
 
 void VehicleNode::ctrlCommandRawCallback(const quadrotor_msgs::ControlCommandConstPtr &command)
 {
-    if (command->armed == 0)
+    if (command->armed == 0 || !armed.load() || hoverable != 2)
         return;
     auto target = mavros_msgs::AttitudeTargetPtr(new mavros_msgs::AttitudeTarget);
     switch (command->control_mode)
@@ -276,14 +339,15 @@ void VehicleNode::ctrlCommandRawCallback(const quadrotor_msgs::ControlCommandCon
         break;
     }
 
-    target->thrust = (command->collective_thrust < 0.0) ? 0.0f : ((command->collective_thrust > 1.0) ? 1.0f : (float)command->collective_thrust);
+    target->thrust = (command->collective_thrust < 0.0) ? 
+        0.0f : ((command->collective_thrust > 1.0) ? 1.0f : (float)command->collective_thrust);
 
     target_pub.publish(target);
 }
 
 void VehicleNode::ctrlCommandCallback(const quadrotor_msgs::ControlCommandConstPtr &command)
 {
-    if (command->armed == 0)
+    if (command->armed == 0 || !armed.load() || hoverable != 2)
         return;
     auto target = mavros_msgs::AttitudeTargetPtr(new mavros_msgs::AttitudeTarget);
     switch (command->control_mode)
@@ -305,9 +369,9 @@ void VehicleNode::ctrlCommandCallback(const quadrotor_msgs::ControlCommandConstP
     }
 
     double thrust = 0.0;
-    collective_force = command->collective_thrust * mass;
     {
         std::lock_guard<std::mutex> lk(mtx_kp);
+        collective_force = command->collective_thrust * mass;
         if (voltage_compensation)
             thrust = quadratic_thrust_model::forceToThrust(motor_params, collective_force, kp, battery_voltage);
         else
@@ -329,6 +393,7 @@ void VehicleNode::tempCallback(const sensor_msgs::TemperatureConstPtr &val)
 {
     std::lock_guard<std::mutex> lk(mtx_kp);
     temp = val->temperature - 20.0;
+    kp = (baro / 101325.0) * (273.15 / (273.15 + temp));
 }
 
 void VehicleNode::batteryCallback(const sensor_msgs::BatteryStateConstPtr &state)
@@ -340,7 +405,10 @@ void VehicleNode::batteryCallback(const sensor_msgs::BatteryStateConstPtr &state
     msg->battery_state = quadrotor_msgs::LowLevelFeedback::BAT_INVALID;
     if (state->cell_voltage.size() > 0)
     {
-        battery_voltage = msg->battery_voltage = state->cell_voltage[0];
+        {
+            std::lock_guard<std::mutex> lk(mtx_kp);
+            battery_voltage = msg->battery_voltage = state->cell_voltage[0];
+        }
         if (msg->battery_voltage > n_lipo_cells * kBatteryLowVoltagePerCell)
         {
             msg->battery_state = quadrotor_msgs::LowLevelFeedback::BAT_GOOD;
@@ -364,7 +432,6 @@ void VehicleNode::batteryCallback(const sensor_msgs::BatteryStateConstPtr &state
     else
     {
         msg->control_mode = use_rate ? quadrotor_msgs::LowLevelFeedback::BODY_RATES : quadrotor_msgs::LowLevelFeedback::ATTITUDE;
-        // msg.control_mode = msg.NONE;
     }
 
     ap_feedback_pub.publish(msg);
@@ -375,6 +442,6 @@ int main(int argc, char **argv)
     ros::init(argc, argv, "apm_bridge");
     ros::NodeHandle nh("~");
     VehicleNode vh_node(nh);
-    ros::spin();
+    vh_node.Spin();
     return 0;
 }

@@ -8,7 +8,7 @@
 # lio_frame: "lio_link"
 
 gravity_const: 9.801
-mass: 9.0
+mass: 4.0
 
 lipo_cells: 6
 voltage_compensation: false
@@ -20,3 +20,8 @@ motor_parameters:
   n: 1
   voltage_a: 0.0
   voltage_b: 0.0
+
+init_position:
+  altitude: 100.0
+  latitude: 40.0422820
+  longitude: 116.3714300
