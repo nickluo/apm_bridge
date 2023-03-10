@@ -18,7 +18,7 @@ using namespace apm_bridge;
 namespace mavlink_msg = mavlink::common::msg;
 
 VehicleNode::VehicleNode(ros::NodeHandle &handle)
-    : nh(handle), ema(10)
+    : nh(handle), ema(50)
 {
     nh.param("gravity_const", gravity, 9.80665);
     nh.param("mass", mass, 2.0);
@@ -226,6 +226,9 @@ void VehicleNode::setupMavlink()
         mesg.request.message_id = mavlink_msg::LOCAL_POSITION_NED::MSG_ID;
         mesg.request.message_rate = (float)control_freqency;
         set_message_interval.call(mesg);
+        mesg.request.message_id = mavlink_msg::SCALED_IMU::MSG_ID;
+        mesg.request.message_rate = 100.0f;
+        set_message_interval.call(mesg);
     }
     else
     {
@@ -299,13 +302,13 @@ void VehicleNode::imuCallback(const sensor_msgs::ImuConstPtr &val)
         ema.reset();
     }
 
-    if (current_state == mavros_msgs::ExtendedState::LANDED_STATE_ON_GROUND || !armed.load()) // Update g value
+    if (current_state == mavros_msgs::ExtendedState::LANDED_STATE_ON_GROUND && !armed.load()) // Update g value
     {
         auto acc = std::sqrt(val->linear_acceleration.x * val->linear_acceleration.x +
                              val->linear_acceleration.y * val->linear_acceleration.y +
                              val->linear_acceleration.z * val->linear_acceleration.z);
         gravity_acc = ema.filter(acc, 2);
-        //printf("gravity updated : %f\n", gravity_acc);
+        // printf("gravity updated : %f\n", gravity_acc);
     }
     else if (current_state == mavros_msgs::ExtendedState::LANDED_STATE_IN_AIR
         && (hoverable == 1 || (hoverable==2 && in_hover))) // Update mass when hovering
@@ -328,8 +331,8 @@ void VehicleNode::imuCallback(const sensor_msgs::ImuConstPtr &val)
         //                      val->linear_acceleration.y * val->linear_acceleration.y +
         //                      val->linear_acceleration.z * val->linear_acceleration.z);
 
-        if (std::fabs(roll) < 0.01 && std::fabs(pitch) < 0.01 && ema.filter(acc.length2(), 4) < 0.001)
-            // && std::abs(collective_force) > 10.0) // if hovering
+        if (std::fabs(roll) < 0.01 && std::fabs(pitch) < 0.01 && ema.filter(acc.length2(), 4) < 0.01
+            && collective_force > mass*gravity*0.5) // if hovering
         {
             std::lock_guard<std::mutex> lk(mtx_kp);
             mass = ema.filter(collective_force / gravity, 3);
