@@ -8,15 +8,18 @@
 # lio_frame: "lio_link"
 
 gravity_const: 9.801
-mass: 4.0
+mass: 2.4
 
 lipo_cells: 6
 voltage_compensation: false
 
+simulation: false
+control_freqency: 20
+
 motor_parameters:
-  a: -0.10968415365433701
-  b: 1.51403837029178
-  c: 202.59783128083356
+  a:  -0.21295089626
+  b:   2.75208143673
+  c: 167.98980891836
   n: 1
   voltage_a: 0.0
   voltage_b: 0.0

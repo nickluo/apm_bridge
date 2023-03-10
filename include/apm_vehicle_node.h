@@ -90,6 +90,9 @@ namespace apm_bridge
 
         double gravity;
 
+        double control_freqency;
+        bool simulation;
+
         std::mutex mtx_kp;
         double kp = 1.0;
         double temp = 15.0;
@@ -101,6 +104,7 @@ namespace apm_bridge
         int n_lipo_cells;
 
         uint8_t hoverable = 0; // 0: n/a 1: internal 2: external
+        bool in_hover = false;
 
         // std::vector<double> ex_r_i_a;
         // std::vector<double> ex_r_a_v;

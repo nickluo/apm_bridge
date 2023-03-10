@@ -38,7 +38,7 @@ double forceToThrust(const MotorParams &motor_params, double force, double kp, d
             motor_params.voltage_map_b;
     force *= ratio;
   }
-  return std::sqrt(motor_params.C - force / (motor_params.n_motors*kp)) * motor_params.A + motor_params.B;
+  return std::sqrt(std::abs(motor_params.C - force / (motor_params.n_motors*kp))) * motor_params.A + motor_params.B;
 }
 
 }  // namespace quadratic_thrust_model

@@ -23,6 +23,9 @@ VehicleNode::VehicleNode(ros::NodeHandle &handle)
     nh.param("gravity_const", gravity, 9.80665);
     nh.param("mass", mass, 2.0);
 
+    nh.param("control_freqency", control_freqency, 10.0);
+    nh.param("simulation", simulation, false);
+
     nh.param("lipo_cells", n_lipo_cells, 6);
     nh.param("voltage_compensation", voltage_compensation, false);
 
@@ -214,12 +217,22 @@ void VehicleNode::setupMavlink()
     mesg.request.message_id = mavlink_msg::ATTITUDE_QUATERNION::MSG_ID;
     mesg.request.message_rate = 100.0f;
     set_message_interval.call(mesg);
-    mesg.request.message_id = mavlink_msg::SCALED_IMU::MSG_ID;
-    mesg.request.message_rate = 200.0f;
-    set_message_interval.call(mesg);
     mesg.request.message_id = mavlink_msg::BATTERY_STATUS::MSG_ID;
     mesg.request.message_rate = 1.0f;
     set_message_interval.call(mesg);
+
+    if (simulation)
+    {
+        mesg.request.message_id = mavlink_msg::LOCAL_POSITION_NED::MSG_ID;
+        mesg.request.message_rate = (float)control_freqency;
+        set_message_interval.call(mesg);
+    }
+    else
+    {
+        mesg.request.message_id = mavlink_msg::SCALED_IMU::MSG_ID;
+        mesg.request.message_rate = 200.0f;
+        set_message_interval.call(mesg);
+    }
 }
 
 void VehicleNode::extStateCallback(const mavros_msgs::ExtendedStateConstPtr &state)
@@ -257,7 +270,7 @@ void VehicleNode::stateCallback(const mavros_msgs::StateConstPtr &state)
 
 void VehicleNode::attiTargetCallback(const mavros_msgs::AttitudeTargetConstPtr &att)
 {
-    if (hoverable < 2) // not in GUIDED or GUIDED_NOGPS mode
+    if (hoverable >=1 ) // when hoverable mode
     {
         std::lock_guard<std::mutex> lk(mtx_kp);
         if (voltage_compensation)
@@ -292,12 +305,13 @@ void VehicleNode::imuCallback(const sensor_msgs::ImuConstPtr &val)
                              val->linear_acceleration.y * val->linear_acceleration.y +
                              val->linear_acceleration.z * val->linear_acceleration.z);
         gravity_acc = ema.filter(acc, 2);
-        // printf("gravity updated : %f\n", gravity);
+        //printf("gravity updated : %f\n", gravity_acc);
     }
-    else if (current_state == mavros_msgs::ExtendedState::LANDED_STATE_IN_AIR) // Update mass when hovering
+    else if (current_state == mavros_msgs::ExtendedState::LANDED_STATE_IN_AIR
+        && (hoverable == 1 || (hoverable==2 && in_hover))) // Update mass when hovering
     {
-        auto r_roll = ema.filter(val->angular_velocity.x, 0);
-        auto r_pitch = ema.filter(val->angular_velocity.y, 1);
+        // auto r_roll = ema.filter(val->angular_velocity.x, 0);
+        // auto r_pitch = ema.filter(val->angular_velocity.y, 1);
 
         // acceleration without gravity
         tf2::Matrix3x3 mat(tf2::Quaternion(val->orientation.x, val->orientation.y, val->orientation.z, val->orientation.w));
@@ -308,10 +322,18 @@ void VehicleNode::imuCallback(const sensor_msgs::ImuConstPtr &val)
         acc.setZ(val->linear_acceleration.z - std::cos(roll) * std::cos(pitch) * gravity_acc);
         acc.setX(val->linear_acceleration.x + std::sin(pitch) * gravity_acc);
 
-        if (std::fabs(r_roll) < 0.1 && std::fabs(r_pitch) < 0.1 && ema.filter(acc.length2(), 4) < 0.01) // if hovering
+        // ROS_WARN("acc (%f, %f, %f)", acc.x(), acc.y(), acc.z());
+
+        // auto acc = std::sqrt(val->linear_acceleration.x * val->linear_acceleration.x +
+        //                      val->linear_acceleration.y * val->linear_acceleration.y +
+        //                      val->linear_acceleration.z * val->linear_acceleration.z);
+
+        if (std::fabs(roll) < 0.01 && std::fabs(pitch) < 0.01 && ema.filter(acc.length2(), 4) < 0.001)
+            // && std::abs(collective_force) > 10.0) // if hovering
         {
             std::lock_guard<std::mutex> lk(mtx_kp);
             mass = ema.filter(collective_force / gravity, 3);
+            ROS_WARN("Updated Mass = %f kg", mass);
         }
     }
 }
@@ -347,18 +369,52 @@ void VehicleNode::ctrlCommandRawCallback(const quadrotor_msgs::ControlCommandCon
 
 void VehicleNode::ctrlCommandCallback(const quadrotor_msgs::ControlCommandConstPtr &command)
 {
+    const double delta_t = 1.0/control_freqency;
+    static bool set_unarm = false;
+
+    if (set_unarm && armed.load() && 
+        landed_state.load() == mavros_msgs::ExtendedState::LANDED_STATE_ON_GROUND)
+    {
+        mavros_msgs::CommandBool param;
+        param.request.value = 0;
+        command_arming.call(param);
+        // ROS_WARN("unarm result %d, %d", param.response.result, param.response.success);
+        set_unarm = false;
+        return;
+    }
+
     if (command->armed == 0 || !armed.load() || hoverable != 2)
         return;
+
+    if (command->collective_thrust < 1e-6)  //Prepare unarming
+    {
+        set_unarm = true;
+    }
+
+    in_hover = command->is_hover_state != 0;
     auto target = mavros_msgs::AttitudeTargetPtr(new mavros_msgs::AttitudeTarget);
     switch (command->control_mode)
     {
     case quadrotor_msgs::ControlCommand::ATTITUDE:
+    {
         target->type_mask = mavros_msgs::AttitudeTarget::IGNORE_PITCH_RATE |
                             mavros_msgs::AttitudeTarget::IGNORE_ROLL_RATE |
                             mavros_msgs::AttitudeTarget::IGNORE_YAW_RATE;
-        target->orientation = command->orientation;
+
+        tf2::Quaternion delta_q;
+        delta_q.setRPY(command->bodyrates.x*delta_t, 
+                     command->bodyrates.y*delta_t, 
+                     command->bodyrates.z*delta_t);
+        tf2::Quaternion att = 
+            tf2::Quaternion(command->orientation.x, command->orientation.y, command->orientation.z, command->orientation.w) * delta_q;
+        target->orientation.w = att.w();
+        target->orientation.x = att.x();
+        target->orientation.y = att.y();
+        target->orientation.z = att.z();
+
         use_rate = false;
         break;
+    }
     case quadrotor_msgs::ControlCommand::BODY_RATES:
         target->type_mask = mavros_msgs::AttitudeTarget::IGNORE_ATTITUDE;
         target->body_rate = command->bodyrates;
@@ -371,11 +427,11 @@ void VehicleNode::ctrlCommandCallback(const quadrotor_msgs::ControlCommandConstP
     double thrust = 0.0;
     {
         std::lock_guard<std::mutex> lk(mtx_kp);
-        collective_force = command->collective_thrust * mass;
+        auto force = command->collective_thrust * mass;
         if (voltage_compensation)
-            thrust = quadratic_thrust_model::forceToThrust(motor_params, collective_force, kp, battery_voltage);
+            thrust = quadratic_thrust_model::forceToThrust(motor_params, force, kp, battery_voltage);
         else
-            thrust = quadratic_thrust_model::forceToThrust(motor_params, collective_force, kp);
+            thrust = quadratic_thrust_model::forceToThrust(motor_params, force, kp);
     }
     target->thrust = (thrust < 0.0) ? 0.0f : ((thrust > 1.0) ? 1.0f : (float)thrust);
 

@@ -2,6 +2,8 @@
 	<!-- vim: set ft=xml noet : -->
 	<!-- example launch script for ArduPilot based FCU's -->
 
+	<arg name="quad_name" default="tarot650"/>
+
 	<arg name="fcu_url" default="/dev/ttyUSB0:921600" />
 	<arg name="gcs_url" default="" />
 	<arg name="tgt_system" default="1" />
@@ -24,10 +26,10 @@
 	</include>
 
 	<node pkg="apm_bridge" type="apm_bridge_node"  name="apm_bridge" output="screen">
-      <rosparam file="$(find apm_bridge)/parameters.yaml"/>
-	  <remap from="~low_level_feedback" to="/m300/low_level_feedback" />
-	  <remap from="~control_command" to="/m300/control_command" />
-	  <remap from="~control_command_raw" to="/m300/control_command_raw" />
-	  <remap from="~arm" to="/m300/bridge/arm" />
+      <rosparam file="$(find apm_bridge)/parameters/$(arg quad_name)_parameters.yaml"/>
+	  <remap from="~low_level_feedback" to="/$(arg quad_name)/low_level_feedback" />
+	  <remap from="~control_command" to="/$(arg quad_name)/control_command" />
+	  <remap from="~control_command_raw" to="/$(arg quad_name)/control_command_raw" />
+	  <remap from="~arm" to="/$(arg quad_name)/bridge/arm" />
     </node>
 </launch>

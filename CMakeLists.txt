@@ -76,13 +76,13 @@ set(CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake-modules")
 # )
 
 ## Generate added messages and services with any dependencies listed here
- generate_messages(
-   DEPENDENCIES
-   geometry_msgs
-   nav_msgs
-   std_msgs  # Or other packages containing msgs
-   sensor_msgs
- )
+#  generate_messages(
+#    DEPENDENCIES
+#    geometry_msgs
+#    nav_msgs
+#    std_msgs  # Or other packages containing msgs
+#    sensor_msgs
+#  )
 
 ################################################
 ## Declare ROS dynamic reconfigure parameters ##
