@@ -212,13 +212,16 @@ void VehicleNode::setupMavlink()
     mesg.request.message_rate = 5.0f;
     set_message_interval.call(mesg);
     mesg.request.message_id = mavlink_msg::SCALED_PRESSURE::MSG_ID;
-    mesg.request.message_rate = 10.0f;
+    mesg.request.message_rate = 5.0f;
     set_message_interval.call(mesg);
     mesg.request.message_id = mavlink_msg::ATTITUDE_QUATERNION::MSG_ID;
     mesg.request.message_rate = 100.0f;
     set_message_interval.call(mesg);
     mesg.request.message_id = mavlink_msg::BATTERY_STATUS::MSG_ID;
     mesg.request.message_rate = 1.0f;
+    set_message_interval.call(mesg);
+    mesg.request.message_id = mavlink_msg::RC_CHANNELS::MSG_ID;
+    mesg.request.message_rate = 50.0f;
     set_message_interval.call(mesg);
 
     if (simulation)
