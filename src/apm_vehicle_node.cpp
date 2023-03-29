@@ -224,6 +224,10 @@ void VehicleNode::setupMavlink()
     mesg.request.message_rate = 50.0f;
     set_message_interval.call(mesg);
 
+    mesg.request.message_id = mavlink_msg::DISTANCE_SENSOR::MSG_ID;
+    mesg.request.message_rate = 10.0f;
+    set_message_interval.call(mesg);
+
     if (simulation)
     {
         mesg.request.message_id = mavlink_msg::LOCAL_POSITION_NED::MSG_ID;
