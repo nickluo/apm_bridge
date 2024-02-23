@@ -14,7 +14,7 @@ lipo_cells: 3
 voltage_compensation: false
 
 simulation: true
-control_freqency: 20
+control_freqency: 50
 
 motor_parameters:
   a:  -0.21295089626
