@@ -341,9 +341,13 @@ void VehicleNode::imuCallback(const sensor_msgs::ImuConstPtr &val)
         if (std::fabs(roll) < 0.01 && std::fabs(pitch) < 0.01 && ema.filter(acc.length2(), 4) < 0.01
             && collective_force > mass*gravity*0.5) // if hovering
         {
-            std::lock_guard<std::mutex> lk(mtx_kp);
-            mass = ema.filter(collective_force / gravity, 3);
-            ROS_WARN("Updated Mass = %f kg", mass);
+            auto mass_t = ema.filter(collective_force / gravity, 3);
+            if (std::fabs(mass_t - mass) > 0.1)
+            {
+                std::lock_guard<std::mutex> lk(mtx_kp);
+                mass = mass_t;
+                ROS_WARN("Updated Mass = %f kg", mass);
+            }
         }
     }
 }
