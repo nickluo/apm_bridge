@@ -1,272 +1,236 @@
 #include "apm_vehicle_node.h"
-
-#include <tf2/LinearMath/Matrix3x3.h>
-#include <tf2/convert.h>
-#include <tf2_geometry_msgs/tf2_geometry_msgs.h>
-#include <fstream>
-#include <cstdlib>
-
 #include <mavlink/v2.0/ardupilotmega/ardupilotmega.hpp>
 
-#include <mavros_msgs/CommandBool.h>
-
-#include <geographic_msgs/GeoPointStamped.h>
-#include <mavros_msgs/CommandHome.h>
-
 using namespace apm_bridge;
-
 namespace mavlink_msg = mavlink::common::msg;
 
-VehicleNode::VehicleNode(ros::NodeHandle &handle)
-    : nh(handle), ema(50)
+VehicleNode::VehicleNode()
+    : Node("apm_vehicle_node"), ema(50)
 {
-    nh.param("gravity_const", gravity, 9.80665);
-    nh.param("mass", mass, 2.0);
+    this->declare_parameter<double>("gravity_const", 9.80665);
+    this->declare_parameter<double>("mass", 2.0);
+    this->declare_parameter<double>("control_frequency", 10.0);
+    this->declare_parameter<bool>("simulation", false);
+    this->declare_parameter<int>("lipo_cells", 6);
+    this->declare_parameter<bool>("voltage_compensation", false);
+    this->declare_parameter<double>("motor_parameters.a", 0.0);
+    this->declare_parameter<double>("motor_parameters.b", 0.0);
+    this->declare_parameter<double>("motor_parameters.c", 0.0);
+    this->declare_parameter<int>("motor_parameters.n", 1);
+    this->declare_parameter<double>("motor_parameters.voltage_a", 0.0);
+    this->declare_parameter<double>("motor_parameters.voltage_b", 0.0);
+    this->declare_parameter<double>("init_position.altitude", 100.0);
+    this->declare_parameter<double>("init_position.latitude", 0.0);
+    this->declare_parameter<double>("init_position.longitude", 0.0);
 
-    nh.param("control_freqency", control_freqency, 10.0);
-    nh.param("simulation", simulation, false);
+    this->get_parameter("gravity_const", gravity);
+    this->get_parameter("mass", mass);
+    this->get_parameter("control_frequency", control_frequency);
+    this->get_parameter("simulation", simulation);
+    this->get_parameter("lipo_cells", n_lipo_cells);
+    this->get_parameter("voltage_compensation", voltage_compensation);
+    double a, b, c;
+    this->get_parameter("motor_parameters.a", a);
+    this->get_parameter("motor_parameters.b", b);
+    this->get_parameter("motor_parameters.c", c);
+    this->get_parameter("motor_parameters.n", motor_params.n_motors);
+    this->get_parameter("motor_parameters.voltage_a", motor_params.voltage_map_a);
+    this->get_parameter("motor_parameters.voltage_b", motor_params.voltage_map_b);
 
-    nh.param("lipo_cells", n_lipo_cells, 6);
-    nh.param("voltage_compensation", voltage_compensation, false);
+    quadratic_thrust_model::convert_from_abc(motor_params, a, b, c);
 
-    nh.param("motor_parameters/a", motor_params.A, 0.0);
-    nh.param("motor_parameters/b", motor_params.B, 0.0);
-    nh.param("motor_parameters/c", motor_params.C, 0.0);
-    nh.param("motor_parameters/n", motor_params.n_motors, 1);
-    nh.param("motor_parameters/voltage_a", motor_params.voltage_map_a, 0.0);
-    nh.param("motor_parameters/voltage_b", motor_params.voltage_map_b, 0.0);
+    printf("Motor parameters: A=%.6f, B=%.6f, C=%.6f, n=%d, voltage_a=%.6f, voltage_b=%.6f\n", 
+        motor_params.A, motor_params.B, motor_params.C, motor_params.n_motors, motor_params.voltage_map_a, motor_params.voltage_map_b);
 
-    // nh.param("extrinsic_R_IinA", ex_r_i_a, std::vector<double>(9, 0));
-    // nh.param("extrinsic_R_AinV", ex_r_a_v, std::vector<double>(9, 0));
-    // nh.param("extrinsic_T_IinA", ex_t_i_a, std::vector<double>(3, 0));
-    // nh.param("extrinsic_T_AinV", ex_t_a_v, std::vector<double>(3, 0));
+    // setupMavlink();
 
-    // nh.param("base_link_frame", frame_id_base_link, {});
-    // nh.param("axis_frame", frame_id_axis, {});
-    // nh.param("lio_frame", frame_id_lio, {});
+    tf_br = std::make_shared<tf2_ros::TransformBroadcaster>(this);
+    tf_br_static = std::make_shared<tf2_ros::StaticTransformBroadcaster>(this);
 
-    // tf2::Matrix3x3 mat0(ex_r_a_v[0], ex_r_a_v[1], ex_r_a_v[2],
-    //                     ex_r_a_v[3], ex_r_a_v[4], ex_r_a_v[5],
-    //                     ex_r_a_v[6], ex_r_a_v[7], ex_r_a_v[8]);
-    // tf2::Matrix3x3 mat1(ex_r_i_a[0], ex_r_i_a[1], ex_r_i_a[2],
-    //                     ex_r_i_a[3], ex_r_i_a[4], ex_r_i_a[5],
-    //                     ex_r_i_a[6], ex_r_i_a[7], ex_r_i_a[8]);
-    // mat0.getRotation(q0);
-    // mat1.getRotation(q1);
-    // v0.setValue(ex_t_a_v[0], ex_t_a_v[1], ex_t_a_v[2]);
-    // v1.setValue(ex_t_i_a[0], ex_t_i_a[1], ex_t_i_a[2]);
+    control_command_sub = this->create_subscription<quadrotor_msgs::msg::ControlCommand>(
+        "~/control_command", rclcpp::QoS(rclcpp::KeepLast(1)).best_effort(), std::bind(&VehicleNode::ctrlCommandCallback, this, std::placeholders::_1));
+    control_command_raw_sub = this->create_subscription<quadrotor_msgs::msg::ControlCommand>(
+        "~/control_command_raw", rclcpp::QoS(rclcpp::KeepLast(5)).best_effort(), std::bind(&VehicleNode::ctrlCommandRawCallback, this, std::placeholders::_1));
+    imu_sub = this->create_subscription<sensor_msgs::msg::Imu>(
+        "/mavros/imu/data", 
+        rclcpp::QoS(rclcpp::KeepLast(10)).best_effort(), 
+        std::bind(&VehicleNode::imuCallback, this, std::placeholders::_1));
+    atti_target_sub = this->create_subscription<mavros_msgs::msg::AttitudeTarget>(
+        "/mavros/setpoint_raw/target_attitude", 
+        rclcpp::QoS(rclcpp::KeepLast(10)).best_effort(), 
+        std::bind(&VehicleNode::attiTargetCallback, this, std::placeholders::_1));
+    arm_interface_sub = this->create_subscription<std_msgs::msg::Bool>(
+        "~/arm",
+        rclcpp::QoS(rclcpp::KeepLast(1)).best_effort(), 
+        std::bind(&VehicleNode::armCallback, this, std::placeholders::_1));
+    atm_sub = this->create_subscription<sensor_msgs::msg::FluidPressure>(
+        "/mavros/imu/static_pressure", 
+        rclcpp::QoS(rclcpp::KeepLast(10)).best_effort(), 
+        std::bind(&VehicleNode::atmPressureCallback, this, std::placeholders::_1));
+    temp_sub = this->create_subscription<sensor_msgs::msg::Temperature>(
+        "/mavros/imu/temperature_baro", 
+        rclcpp::QoS(rclcpp::KeepLast(10)).best_effort(), 
+        std::bind(&VehicleNode::tempCallback, this, std::placeholders::_1));
+    ext_state_sub = this->create_subscription<mavros_msgs::msg::ExtendedState>(
+        "/mavros/extended_state", 
+        rclcpp::QoS(rclcpp::KeepLast(10)).best_effort(), 
+        std::bind(&VehicleNode::extStateCallback, this, std::placeholders::_1));
+    state_sub = this->create_subscription<mavros_msgs::msg::State>(
+        "/mavros/state", 
+        rclcpp::QoS(rclcpp::KeepLast(10)).best_effort(), 
+        std::bind(&VehicleNode::stateCallback, this, std::placeholders::_1));
+    battery_sub = this->create_subscription<sensor_msgs::msg::BatteryState>(
+        "/mavros/battery", 
+        rclcpp::QoS(rclcpp::KeepLast(10)).best_effort(), 
+        std::bind(&VehicleNode::batteryCallback, this, std::placeholders::_1));
 
-    // geometry_msgs::TransformStamped tf_axis2base;
-    // tf_axis2base.header.stamp = ros::Time::now();
-    // tf_axis2base.header.frame_id = frame_id_base_link;
-    // tf_axis2base.child_frame_id = frame_id_axis;
-    // tf2::convert(q0, tf_axis2base.transform.rotation);
-    // tf2::convert(v0, tf_axis2base.transform.translation);
+    target_pub = this->create_publisher<mavros_msgs::msg::AttitudeTarget>("/mavros/setpoint_raw/attitude", 10);
+    ap_feedback_pub = this->create_publisher<quadrotor_msgs::msg::LowLevelFeedback>("~/low_level_feedback", 10);
 
-    // tf_br_static.sendTransform(tf_axis2base);
+    command_arming = this->create_client<mavros_msgs::srv::CommandBool>("/mavros/cmd/arming");
 
-    nh.setCallbackQueue(&queue_control);
-    control_command_sub = nh.subscribe("control_command", 10, &VehicleNode::ctrlCommandCallback, this, ros::TransportHints().tcpNoDelay());
-    control_command_raw_sub = nh.subscribe("control_command_raw", 10, &VehicleNode::ctrlCommandRawCallback, this, ros::TransportHints().tcpNoDelay());
-    
-    nh.setCallbackQueue(&queue_fast);
-    imu_sub = nh.subscribe("/mavros/imu/data", 10, &VehicleNode::imuCallback, this, ros::TransportHints().tcpNoDelay());
-    atti_target_sub = nh.subscribe("/mavros/setpoint_raw/target_attitude", 10, &VehicleNode::attiTargetCallback, this, ros::TransportHints().tcpNoDelay());
-
-    nh.setCallbackQueue(&queue_slow);
-    arm_interface_sub = nh.subscribe("arm", 1, &VehicleNode::armCallback, this);
-    atm_sub = nh.subscribe("/mavros/imu/static_pressure", 10, &VehicleNode::atmPressureCallback, this);
-    temp_sub = nh.subscribe("/mavros/imu/temperature_baro", 10, &VehicleNode::tempCallback, this);
-    ext_state_sub = nh.subscribe("/mavros/extended_state", 10, &VehicleNode::extStateCallback, this);
-    state_sub = nh.subscribe("/mavros/state", 10, &VehicleNode::stateCallback, this);
-    battery_sub = nh.subscribe("/mavros/battery", 10, &VehicleNode::batteryCallback, this);
-
-    target_pub = nh.advertise<mavros_msgs::AttitudeTarget>("/mavros/setpoint_raw/attitude", 10);
-    ap_feedback_pub = nh.advertise<quadrotor_msgs::LowLevelFeedback>("low_level_feedback", 10);
-
-    command_arming = nh.serviceClient<mavros_msgs::CommandBool>("/mavros/cmd/arming");
-    command_arming.waitForExistence();
-
-    setupMavlink();
-
-    sync_worker = std::thread([this]() {
-        auto set_global_pos_pub = nh.advertise<geographic_msgs::GeoPointStamped>("/mavros/global_position/set_gp_origin", 1, true);
-        geographic_msgs::GeoPointStamped pos;
-        nh.param("init_position/altitude", pos.position.altitude, 100.0);
-        nh.param("init_position/latitude", pos.position.latitude, 0.0);
-        nh.param("init_position/longitude", pos.position.longitude, 0.0);
-
-        while (sync_running && set_global_pos_pub.getNumSubscribers() == 0)
-            ros::Duration(1.0).sleep();
-
-        if (sync_running)
-        {
-            set_global_pos_pub.publish(pos);
-        
-            auto command_set_home = nh.serviceClient<mavros_msgs::CommandHome>("/mavros/cmd/set_home");
-            mavros_msgs::CommandHome params;
-            params.request.current_gps = 0;
-            params.request.yaw = 0;
-            params.request.altitude = pos.position.altitude;
-            params.request.latitude = pos.position.latitude;
-            params.request.longitude = pos.position.longitude;
-            command_set_home.call(params);
-        }
+    waypoint_list_sub = this->create_subscription<mavros_msgs::msg::WaypointList>("/mavros/mission/waypoints", 10, 
+        [&](const mavros_msgs::msg::WaypointList::SharedPtr msg) {
+            RCLCPP_INFO(this->get_logger(), "Received WaypointList with %zu waypoints", msg->waypoints.size());
+            // sync_timer_ = this->create_wall_timer(std::chrono::seconds(1), std::bind(&VehicleNode::syncWorkerCallback, this));
+            auto t = std::thread(&VehicleNode::setupMavlink, this);
+            t.detach();
+            waypoint_list_sub.reset();
     });
 
-    // sync_worker = std::thread([this]()
-    // {
-    //     std::fstream ivc("/sys/devices/aon_echo/data_channel");
-    //     if (ivc.peek()==0)
-    //     {
-    //         ivc<<"ENABLE\n";
-    //         printf("============== ENABLE aon_echo/data_channel ==============\n");
-    //     }
-    //     std::string line;
-    //     char *endptr = nullptr;
-    //     int64_t last_tsc = 0;
-    //     ros::Rate rate(100);
-    //     while(sync_running)
-    //     {
-    //         ivc<<"REPORT\n";
-    //         ivc.flush();
-    //         rate.sleep();
-    //         int i = 0;
-    //         while (i++<5)
-    //         {
-    //             ivc.seekg(0, ivc.beg);
-    //             std::getline(ivc, line);
-    //             if (line.compare(0, 4, "RES ")==0)
-    //             {
-    //                 const char *str = line.c_str()+4;
-    //                 int64_t res_tsc = std::strtol(str, &endptr, 10);
-    //                 if (res_tsc == last_tsc)
-    //                 {
-    //                     rate.sleep();
-    //                     continue;
-    //                 }
-    //                 last_tsc = res_tsc;
-    //                 str = endptr;
-    //                 float pos = std::strtof(str, &endptr);
-    //                 str = endptr;
-    //                 {
-    //                     std::lock_guard<std::mutex> lk(mtx_kp);
-    //                     temp = std::strtof(str, &endptr);
-    //                     kp = (baro/101325.0) * (273.15/(273.15+temp));
-    //                 }
-
-    //                 int64_t current_tsc;
-    //                 timespec current_time;
-    //                 timespec_get(&current_time, TIME_UTC);
-    //                 asm volatile("mrs %0, cntvct_el0":"=r"(current_tsc));
-    //                 current_time.tv_nsec -= (int64_t)((current_tsc - res_tsc)*tsc_1_div_freq*1000);
-    //                 if (current_time.tv_nsec<0l)
-    //                 {
-    //                     --current_time.tv_sec;
-    //                     current_time.tv_nsec = 1000000000l + current_time.tv_nsec;
-    //                 }
-
-    //                 // geometry_msgs::TransformStamped tf_lio;
-    //                 // tf_lio.header.stamp = ros::Time(current_time.tv_sec, current_time.tv_nsec);
-    //                 // tf_lio.header.frame_id = frame_id_axis;
-    //                 // tf_lio.child_frame_id = frame_id_lio;
-    //                 // tf2::convert(v1, tf_lio.transform.translation);
-
-    //                 // tf2::Quaternion qx;
-    //                 // qx.setRPY(pos/180.0*M_PI, 0, 0);
-    //                 // tf2::convert(qx*q1, tf_lio.transform.rotation);
-    //                 // tf_br.sendTransform(tf_lio);
-    //             }
-    //         }
-    //         // std::this_thread::sleep_for(std::chrono::microseconds(100));
-    //     } });
+    set_global_pos_pub = this->create_publisher<geographic_msgs::msg::GeoPointStamped>("/mavros/global_position/set_gp_origin", rclcpp::SensorDataQoS());
+    // sync_timer_ = this->create_wall_timer(std::chrono::seconds(10), std::bind(&VehicleNode::syncWorkerCallback, this));
 }
 
-void VehicleNode::Spin()
+VehicleNode::~VehicleNode() 
 {
-    ros::AsyncSpinner spinner1(1, &queue_control);
-    ros::AsyncSpinner spinner2(1, &queue_fast);
-    ros::AsyncSpinner spinner3(1, &queue_slow);
-    spinner1.start();
-    spinner2.start();
-    spinner3.start();
-    ros::waitForShutdown();
-}
-
-VehicleNode::~VehicleNode()
-{
-    sync_running = false;
-    if (sync_worker.joinable())
-        sync_worker.join();
+    sync_timer_->cancel();
 }
 
 void VehicleNode::setupMavlink()
 {
-    auto set_message_interval = nh.serviceClient<mavros_msgs::MessageInterval>("/mavros/set_message_interval");
-    set_message_interval.waitForExistence();
-    mavros_msgs::MessageInterval mesg;
-    mesg.request.message_id = mavlink_msg::ATTITUDE_TARGET::MSG_ID;
-    mesg.request.message_rate = 10.0f;
-    set_message_interval.call(mesg);
-    mesg.request.message_id = mavlink_msg::EXTENDED_SYS_STATE::MSG_ID;
-    mesg.request.message_rate = 5.0f;
-    set_message_interval.call(mesg);
-    mesg.request.message_id = mavlink_msg::SCALED_PRESSURE::MSG_ID;
-    mesg.request.message_rate = 5.0f;
-    set_message_interval.call(mesg);
-    mesg.request.message_id = mavlink_msg::ATTITUDE_QUATERNION::MSG_ID;
-    mesg.request.message_rate = 100.0f;
-    set_message_interval.call(mesg);
-    mesg.request.message_id = mavlink_msg::BATTERY_STATUS::MSG_ID;
-    mesg.request.message_rate = 1.0f;
-    set_message_interval.call(mesg);
-    mesg.request.message_id = mavlink_msg::RC_CHANNELS::MSG_ID;
-    mesg.request.message_rate = 50.0f;
-    set_message_interval.call(mesg);
+    RCLCPP_WARN(this->get_logger(), "VehicleNode::setupMavlink()");
+    auto set_message_interval = this->create_client<mavros_msgs::srv::CommandLong>("/mavros/cmd/command");
+    if (!set_message_interval->wait_for_service(std::chrono::seconds(10)) || !set_message_interval->service_is_ready()) {
+        RCLCPP_ERROR(this->get_logger(), "Service /mavros/cmd/command not available");
+        return;
+    }
 
-    mesg.request.message_id = mavlink_msg::DISTANCE_SENSOR::MSG_ID;
-    mesg.request.message_rate = 10.0f;
-    set_message_interval.call(mesg);
+    auto send_request = [&](uint32_t msg_id, float msg_rate) {
+        auto cmdrq = std::make_shared<mavros_msgs::srv::CommandLong::Request>();
+        cmdrq->broadcast = false;
+        cmdrq->command = uint16_t(mavlink::ardupilotmega::MAV_CMD::SET_MESSAGE_INTERVAL);
+        cmdrq->confirmation = false;
+        cmdrq->param1 = msg_id;
+        cmdrq->param2 = 1000000.0f / msg_rate;
+
+        auto future = set_message_interval->async_send_request(cmdrq,
+            [&](rclcpp::Client<mavros_msgs::srv::CommandLong>::SharedFuture future) {
+                // RCLCPP_ERROR(this->get_logger(), "set_message_interval callback called");
+                if (future.valid()) {
+                    RCLCPP_INFO(this->get_logger(), "Set message interval for msg_id %u to %.2f Hz", msg_id, msg_rate);
+                } else {
+                    RCLCPP_ERROR(this->get_logger(), "Failed to set message interval for msg_id %u", msg_id);
+                }
+            });
+        future.wait();
+    };
+
+    // auto set_message_interval = this->create_client<mavros_msgs::srv::MessageInterval>("/mavros/set_message_interval");
+    // if (!set_message_interval->wait_for_service(std::chrono::seconds(10)) || !set_message_interval->service_is_ready()) {
+    //     RCLCPP_ERROR(this->get_logger(), "Service /mavros/set_message_interval not available");
+    //     return;
+    // }
+
+    // RCLCPP_WARN(this->get_logger(), "Setting message intervals for various MAVLink messages...");
+    
+    // auto send_request = [&](uint32_t msg_id, float msg_rate) {
+    //     auto request = std::make_shared<mavros_msgs::srv::MessageInterval::Request>();
+    //     request->message_id = msg_id;
+    //     request->message_rate = msg_rate;
+    //     // auto result = set_message_interval->async_send_request(request,
+    //     //     [this, msg_id, msg_rate](rclcpp::Client<mavros_msgs::srv::MessageInterval>::SharedFuture future) {
+    //     //         RCLCPP_ERROR(this->get_logger(), "set_message_interval callback called");
+    //     //         if (future.valid()) {
+    //     //             RCLCPP_INFO(this->get_logger(), "Set message interval for msg_id %u to %.2f Hz", msg_id, msg_rate);
+    //     //         } else {
+    //     //             RCLCPP_ERROR(this->get_logger(), "Failed to set message interval for msg_id %u", msg_id);
+    //     //         }
+    //     //     });
+    //     // bool suc = executeService<mavros_msgs::srv::MessageInterval>(set_message_interval, request);
+    //     // if (suc)
+    //     // {
+    //     //     RCLCPP_INFO(this->get_logger(), "Set message interval for msg_id %u to %.2f Hz", msg_id, msg_rate);
+    //     // } else {
+    //     //     RCLCPP_ERROR(this->get_logger(), "Failed to set message interval for msg_id %u", msg_id);
+    //     // }
+    //     // auto result = set_message_interval->async_send_request(request);
+    //     // if (rclcpp::spin_until_future_complete(shared_from_this(), result) == rclcpp::FutureReturnCode::SUCCESS)
+    //     // {
+    //     //     RCLCPP_INFO(this->get_logger(), "Set message interval for msg_id %u to %.2f Hz", msg_id, msg_rate);
+    //     // } else {
+    //     //     RCLCPP_ERROR(this->get_logger(), "Failed to set message interval for msg_id %u", msg_id);
+    //     // }
+    // };
+
+    send_request(mavlink_msg::ATTITUDE_TARGET::MSG_ID, 100.0f);
+    send_request(mavlink_msg::EXTENDED_SYS_STATE::MSG_ID, 5.0f);
+    send_request(mavlink_msg::SCALED_PRESSURE::MSG_ID, 5.0f);
+    send_request(mavlink_msg::BATTERY_STATUS::MSG_ID, 1.0f);
+    send_request(mavlink_msg::RC_CHANNELS::MSG_ID, 50.0f);
+    send_request(mavlink_msg::DISTANCE_SENSOR::MSG_ID, 10.0f);
+
+    send_request(mavlink_msg::ATTITUDE_QUATERNION::MSG_ID, 200.0f);
+    send_request(mavlink_msg::SCALED_IMU::MSG_ID, 200.0f);
 
     if (simulation)
     {
-        mesg.request.message_id = mavlink_msg::LOCAL_POSITION_NED::MSG_ID;
-        mesg.request.message_rate = (float)control_freqency;
-        set_message_interval.call(mesg);
-        mesg.request.message_id = mavlink_msg::SCALED_IMU::MSG_ID;
-        mesg.request.message_rate = 100.0f;
-        set_message_interval.call(mesg);
-    }
-    else
-    {
-        mesg.request.message_id = mavlink_msg::SCALED_IMU::MSG_ID;
-        mesg.request.message_rate = 200.0f;
-        set_message_interval.call(mesg);
+        send_request(mavlink_msg::LOCAL_POSITION_NED::MSG_ID, (float)control_frequency*2);
+        // send_request(mavlink_msg::LOCAL_POSITION_NED_COV::MSG_ID, (float)control_frequency);
     }
 }
 
-void VehicleNode::extStateCallback(const mavros_msgs::ExtendedStateConstPtr &state)
+void VehicleNode::syncWorkerCallback()
+{
+    geographic_msgs::msg::GeoPointStamped pos;
+    this->get_parameter("init_position.altitude", pos.position.altitude);
+    this->get_parameter("init_position.latitude", pos.position.latitude);
+    this->get_parameter("init_position.longitude", pos.position.longitude);
+
+    if (set_global_pos_pub->get_subscription_count() > 0)
+    {
+        set_global_pos_pub->publish(pos);
+    
+        auto command_set_home = this->create_client<mavros_msgs::srv::CommandHome>("/mavros/cmd/set_home");
+        if(command_set_home->wait_for_service()) //(std::chrono::seconds(1)))
+        {
+            auto request = std::make_shared<mavros_msgs::srv::CommandHome::Request>();
+            request->current_gps = 0;
+            request->yaw = 0;
+            request->altitude = pos.position.altitude;
+            request->latitude = pos.position.latitude;
+            request->longitude = pos.position.longitude;
+            command_set_home->async_send_request(request);
+            RCLCPP_WARN(this->get_logger(), "VehicleNode::syncWorkerCallback()");
+        }
+        sync_timer_->cancel(); // Stop the timer after successful execution
+    }
+}
+
+void VehicleNode::extStateCallback(const mavros_msgs::msg::ExtendedState::SharedPtr state)
 {
     landed_state = state->landed_state;
 }
 
-void VehicleNode::stateCallback(const mavros_msgs::StateConstPtr &state)
+void VehicleNode::stateCallback(const mavros_msgs::msg::State::SharedPtr state)
 {
     armed.store(state->armed);
-
-    mavlink::minimal::MAV_STATE current_status{state->system_status};
-    if (current_status == mavlink::minimal::MAV_STATE::ACTIVE)
-    {
-    }
-    else if (current_status == mavlink::minimal::MAV_STATE::STANDBY)
-    {
-    }
-    if (state->mode == mavros_msgs::State::MODE_APM_COPTER_LOITER || state->mode == mavros_msgs::State::MODE_APM_COPTER_POSHOLD)
+    if (state->mode == "LOITER" || state->mode == "POSHOLD")
     {
         hoverable = 1;
         rc_manual = true;
     }
-    else if (state->mode == mavros_msgs::State::MODE_APM_COPTER_GUIDED || state->mode == mavros_msgs::State::MODE_APM_COPTER_GUIDED_NOGPS)
+    else if (state->mode == "GUIDED" || state->mode == "GUIDED_NOGPS")
     {
         hoverable = 2;
         rc_manual = false;
@@ -278,28 +242,30 @@ void VehicleNode::stateCallback(const mavros_msgs::StateConstPtr &state)
     }
 }
 
-void VehicleNode::attiTargetCallback(const mavros_msgs::AttitudeTargetConstPtr &att)
+void VehicleNode::attiTargetCallback(const mavros_msgs::msg::AttitudeTarget::SharedPtr att)
 {
-    if (hoverable >=1 ) // when hoverable mode
+    //if (hoverable >=1 ) // when hoverable mode
     {
         std::lock_guard<std::mutex> lk(mtx_kp);
         if (voltage_compensation)
             collective_force = quadratic_thrust_model::thrustToForce(motor_params, att->thrust, kp, battery_voltage);
         else
             collective_force = quadratic_thrust_model::thrustToForce(motor_params, att->thrust, kp);
+        // printf("collective_force: %.2f N, thrust: %.2f, kp: %.2f, voltage: %.2f V\n", collective_force, att->thrust, kp, battery_voltage);
     }
 }
 
-void VehicleNode::armCallback(const std_msgs::Bool::ConstPtr& msg) 
+void VehicleNode::armCallback(const std_msgs::msg::Bool::SharedPtr msg) 
 {
-    mavros_msgs::CommandBool param;
-    param.request.value = msg->data;
-    command_arming.call(param);
+    auto request = std::make_shared<mavros_msgs::srv::CommandBool::Request>();
+    request->value = msg->data;
+    // command_arming->async_send_request(request);
+    executeService<mavros_msgs::srv::CommandBool>(command_arming, request);
 }
 
-void VehicleNode::imuCallback(const sensor_msgs::ImuConstPtr &val)
+void VehicleNode::imuCallback(const sensor_msgs::msg::Imu::SharedPtr val)
 {
-    static uint8_t last_state = mavros_msgs::ExtendedState::LANDED_STATE_UNDEFINED;
+    static uint8_t last_state = mavros_msgs::msg::ExtendedState::LANDED_STATE_UNDEFINED;
     static double gravity_acc = gravity;
 
     auto current_state = landed_state.load();
@@ -309,22 +275,22 @@ void VehicleNode::imuCallback(const sensor_msgs::ImuConstPtr &val)
         ema.reset();
     }
 
-    if (current_state == mavros_msgs::ExtendedState::LANDED_STATE_ON_GROUND && !armed.load()) // Update g value
+    // printf("current_state: %u, armed: %d, hoverable: %u, in_hover: %d, use_rate: %d, collective_force: %.2f N, mass: %.2f kg\n", 
+    //     current_state, armed.load(), hoverable, in_hover, use_rate, collective_force, mass);
+
+    if (current_state == mavros_msgs::msg::ExtendedState::LANDED_STATE_ON_GROUND && !armed.load()) // Update g value
     {
         auto acc = std::sqrt(val->linear_acceleration.x * val->linear_acceleration.x +
                              val->linear_acceleration.y * val->linear_acceleration.y +
                              val->linear_acceleration.z * val->linear_acceleration.z);
         gravity_acc = ema.filter(acc, 2);
-        // printf("gravity updated : %f\n", gravity_acc);
     }
-    else if (current_state == mavros_msgs::ExtendedState::LANDED_STATE_IN_AIR
+    else if (current_state == mavros_msgs::msg::ExtendedState::LANDED_STATE_IN_AIR
         && (hoverable == 1 || (hoverable==2 && in_hover))) // Update mass when hovering
     {
-        // auto r_roll = ema.filter(val->angular_velocity.x, 0);
-        // auto r_pitch = ema.filter(val->angular_velocity.y, 1);
-
-        // acceleration without gravity
-        tf2::Matrix3x3 mat(tf2::Quaternion(val->orientation.x, val->orientation.y, val->orientation.z, val->orientation.w));
+        tf2::Quaternion q;
+        tf2::fromMsg(val->orientation, q);
+        tf2::Matrix3x3 mat(q);
         double roll, pitch, yaw;
         mat.getRPY(roll, pitch, yaw);
         tf2::Vector3 acc;
@@ -332,42 +298,42 @@ void VehicleNode::imuCallback(const sensor_msgs::ImuConstPtr &val)
         acc.setZ(val->linear_acceleration.z - std::cos(roll) * std::cos(pitch) * gravity_acc);
         acc.setX(val->linear_acceleration.x + std::sin(pitch) * gravity_acc);
 
-        // ROS_WARN("acc (%f, %f, %f)", acc.x(), acc.y(), acc.z());
+        // printf("roll: %.2f, pitch: %.2f, yaw: %.2f, acc: (%.2f, %.2f, %.2f) m/s^2\n", 
+        //     roll, pitch, yaw, val->linear_acceleration.x, val->linear_acceleration.y, val->linear_acceleration.z);
+        // printf("Estimated mass: %.2f kg, g: %.2f m/s^2, acc^2: %.2f\n", 
+        //         collective_force / gravity, gravity_acc, acc.length2());
 
-        // auto acc = std::sqrt(val->linear_acceleration.x * val->linear_acceleration.x +
-        //                      val->linear_acceleration.y * val->linear_acceleration.y +
-        //                      val->linear_acceleration.z * val->linear_acceleration.z);
-
-        if (std::fabs(roll) < 0.01 && std::fabs(pitch) < 0.01 && ema.filter(acc.length2(), 4) < 0.01
+        if (std::fabs(roll) < 0.05 && std::fabs(pitch) < 0.05 && ema.filter(acc.length2(), 4) < 0.01
             && collective_force > mass*gravity*0.5) // if hovering
         {
             auto mass_t = ema.filter(collective_force / gravity, 3);
+
             if (std::fabs(mass_t - mass) > 0.1)
             {
                 std::lock_guard<std::mutex> lk(mtx_kp);
                 mass = mass_t;
-                ROS_WARN("Updated Mass = %f kg", mass);
+                RCLCPP_WARN(this->get_logger(), "Updated Mass = %f kg", mass);
             }
         }
     }
 }
 
-void VehicleNode::ctrlCommandRawCallback(const quadrotor_msgs::ControlCommandConstPtr &command)
+void VehicleNode::ctrlCommandRawCallback(const quadrotor_msgs::msg::ControlCommand::SharedPtr command)
 {
     if (command->armed == 0 || !armed.load() || hoverable != 2)
         return;
-    auto target = mavros_msgs::AttitudeTargetPtr(new mavros_msgs::AttitudeTarget);
+    auto target = std::make_unique<mavros_msgs::msg::AttitudeTarget>();
     switch (command->control_mode)
     {
-    case quadrotor_msgs::ControlCommand::ATTITUDE:
-        target->type_mask = mavros_msgs::AttitudeTarget::IGNORE_PITCH_RATE |
-                            mavros_msgs::AttitudeTarget::IGNORE_ROLL_RATE |
-                            mavros_msgs::AttitudeTarget::IGNORE_YAW_RATE;
+    case quadrotor_msgs::msg::ControlCommand::ATTITUDE:
+        target->type_mask = mavros_msgs::msg::AttitudeTarget::IGNORE_PITCH_RATE |
+                            mavros_msgs::msg::AttitudeTarget::IGNORE_ROLL_RATE |
+                            mavros_msgs::msg::AttitudeTarget::IGNORE_YAW_RATE;
         target->orientation = command->orientation;
         use_rate = false;
         break;
-    case quadrotor_msgs::ControlCommand::BODY_RATES:
-        target->type_mask = mavros_msgs::AttitudeTarget::IGNORE_ATTITUDE;
+    case quadrotor_msgs::msg::ControlCommand::BODY_RATES:
+        target->type_mask = mavros_msgs::msg::AttitudeTarget::IGNORE_ATTITUDE;
         target->body_rate = command->bodyrates;
         use_rate = true;
         break;
@@ -378,21 +344,21 @@ void VehicleNode::ctrlCommandRawCallback(const quadrotor_msgs::ControlCommandCon
     target->thrust = (command->collective_thrust < 0.0) ? 
         0.0f : ((command->collective_thrust > 1.0) ? 1.0f : (float)command->collective_thrust);
 
-    target_pub.publish(target);
+    target_pub->publish(std::move(target));
 }
 
-void VehicleNode::ctrlCommandCallback(const quadrotor_msgs::ControlCommandConstPtr &command)
+void VehicleNode::ctrlCommandCallback(const quadrotor_msgs::msg::ControlCommand::SharedPtr command)
 {
-    const double delta_t = 1.0/control_freqency;
+    const double delta_t = 1.0/control_frequency;
     static bool set_unarm = false;
 
     if (set_unarm && armed.load() && 
-        landed_state.load() == mavros_msgs::ExtendedState::LANDED_STATE_ON_GROUND)
+        landed_state.load() == mavros_msgs::msg::ExtendedState::LANDED_STATE_ON_GROUND)
     {
-        mavros_msgs::CommandBool param;
-        param.request.value = 0;
-        command_arming.call(param);
-        // ROS_WARN("unarm result %d, %d", param.response.result, param.response.success);
+        auto request = std::make_shared<mavros_msgs::srv::CommandBool::Request>();
+        request->value = false;
+        // command_arming->async_send_request(request);
+        executeService<mavros_msgs::srv::CommandBool>(command_arming, request);
         set_unarm = false;
         return;
     }
@@ -406,31 +372,32 @@ void VehicleNode::ctrlCommandCallback(const quadrotor_msgs::ControlCommandConstP
     }
 
     in_hover = command->is_hover_state != 0;
-    auto target = mavros_msgs::AttitudeTargetPtr(new mavros_msgs::AttitudeTarget);
+    auto target = std::make_unique<mavros_msgs::msg::AttitudeTarget>();
     switch (command->control_mode)
     {
-    case quadrotor_msgs::ControlCommand::ATTITUDE:
+    case quadrotor_msgs::msg::ControlCommand::ATTITUDE:
     {
-        target->type_mask = mavros_msgs::AttitudeTarget::IGNORE_PITCH_RATE |
-                            mavros_msgs::AttitudeTarget::IGNORE_ROLL_RATE |
-                            mavros_msgs::AttitudeTarget::IGNORE_YAW_RATE;
+        target->type_mask = mavros_msgs::msg::AttitudeTarget::IGNORE_PITCH_RATE |
+                            mavros_msgs::msg::AttitudeTarget::IGNORE_ROLL_RATE |
+                            mavros_msgs::msg::AttitudeTarget::IGNORE_YAW_RATE;
 
         tf2::Quaternion delta_q;
         delta_q.setRPY(command->bodyrates.x*delta_t, 
                      command->bodyrates.y*delta_t, 
                      command->bodyrates.z*delta_t);
-        tf2::Quaternion att = 
-            tf2::Quaternion(command->orientation.x, command->orientation.y, command->orientation.z, command->orientation.w) * delta_q;
-        target->orientation.w = att.w();
-        target->orientation.x = att.x();
-        target->orientation.y = att.y();
-        target->orientation.z = att.z();
+        
+        tf2::Quaternion q_cmd;
+        tf2::fromMsg(command->orientation, q_cmd);
+        tf2::Quaternion att = q_cmd * delta_q;
+        target->orientation = tf2::toMsg(att);
 
         use_rate = false;
         break;
     }
-    case quadrotor_msgs::ControlCommand::BODY_RATES:
-        target->type_mask = mavros_msgs::AttitudeTarget::IGNORE_ATTITUDE;
+    case quadrotor_msgs::msg::ControlCommand::BODY_RATES:
+        target->type_mask = mavros_msgs::msg::AttitudeTarget::IGNORE_ATTITUDE;
+        // target->type_mask = 0;
+        // target->orientation = command->orientation;
         target->body_rate = command->bodyrates;
         use_rate = true;
         break;
@@ -449,30 +416,32 @@ void VehicleNode::ctrlCommandCallback(const quadrotor_msgs::ControlCommandConstP
     }
     target->thrust = (thrust < 0.0) ? 0.0f : ((thrust > 1.0) ? 1.0f : (float)thrust);
 
-    target_pub.publish(target);
+    printf("target bodyrate: (%.2f, %.2f, %.2f) rad/s, force: %.2f, thrust: %.2f\n", 
+        target->body_rate.x, target->body_rate.y, target->body_rate.z, command->collective_thrust * mass, thrust);
+
+    target_pub->publish(std::move(target));
 }
 
-void VehicleNode::atmPressureCallback(const sensor_msgs::FluidPressureConstPtr &val)
+void VehicleNode::atmPressureCallback(const sensor_msgs::msg::FluidPressure::SharedPtr val)
 {
     std::lock_guard<std::mutex> lk(mtx_kp);
     baro = val->fluid_pressure;
-    kp = (baro / 101325.0) * (273.15 / (273.15 + temp));
+    // kp = (baro / 101325.0) * (273.15 / (273.15 + temp));
 }
 
-void VehicleNode::tempCallback(const sensor_msgs::TemperatureConstPtr &val)
+void VehicleNode::tempCallback(const sensor_msgs::msg::Temperature::SharedPtr val)
 {
     std::lock_guard<std::mutex> lk(mtx_kp);
     temp = val->temperature - 20.0;
-    kp = (baro / 101325.0) * (273.15 / (273.15 + temp));
+    // kp = (baro / 101325.0) * (273.15 / (273.15 + temp));
 }
 
-void VehicleNode::batteryCallback(const sensor_msgs::BatteryStateConstPtr &state)
+void VehicleNode::batteryCallback(const sensor_msgs::msg::BatteryState::SharedPtr state)
 {
-    quadrotor_msgs::LowLevelFeedbackPtr msg(new quadrotor_msgs::LowLevelFeedback);
+    auto msg = std::make_unique<quadrotor_msgs::msg::LowLevelFeedback>();
 
-    // Publish a low level feedback message
     msg->header.stamp = state->header.stamp;
-    msg->battery_state = quadrotor_msgs::LowLevelFeedback::BAT_INVALID;
+    msg->battery_state = quadrotor_msgs::msg::LowLevelFeedback::BAT_INVALID;
     if (state->cell_voltage.size() > 0)
     {
         {
@@ -481,37 +450,37 @@ void VehicleNode::batteryCallback(const sensor_msgs::BatteryStateConstPtr &state
         }
         if (msg->battery_voltage > n_lipo_cells * kBatteryLowVoltagePerCell)
         {
-            msg->battery_state = quadrotor_msgs::LowLevelFeedback::BAT_GOOD;
+            msg->battery_state = quadrotor_msgs::msg::LowLevelFeedback::BAT_GOOD;
         }
         else if (msg->battery_voltage >
                 n_lipo_cells * kBatteryCriticalVoltagePerCell)
         {
-            msg->battery_state = quadrotor_msgs::LowLevelFeedback::BAT_LOW;
+            msg->battery_state = quadrotor_msgs::msg::LowLevelFeedback::BAT_LOW;
         }
         else if (msg->battery_voltage >
                 n_lipo_cells * kBatteryInvalidVoltagePerCell)
         {
-            msg->battery_state = quadrotor_msgs::LowLevelFeedback::BAT_CRITICAL;
+            msg->battery_state = quadrotor_msgs::msg::LowLevelFeedback::BAT_CRITICAL;
         }
     }
     
     if (rc_manual)
     {
-        msg->control_mode = quadrotor_msgs::LowLevelFeedback::RC_MANUAL;
+        msg->control_mode = quadrotor_msgs::msg::LowLevelFeedback::RC_MANUAL;
     }
     else
     {
-        msg->control_mode = use_rate ? quadrotor_msgs::LowLevelFeedback::BODY_RATES : quadrotor_msgs::LowLevelFeedback::ATTITUDE;
+        msg->control_mode = use_rate ? quadrotor_msgs::msg::LowLevelFeedback::BODY_RATES : quadrotor_msgs::msg::LowLevelFeedback::ATTITUDE;
     }
 
-    ap_feedback_pub.publish(msg);
+    ap_feedback_pub->publish(std::move(msg));
 }
 
 int main(int argc, char **argv)
 {
-    ros::init(argc, argv, "apm_bridge");
-    ros::NodeHandle nh("~");
-    VehicleNode vh_node(nh);
-    vh_node.Spin();
+    rclcpp::init(argc, argv);
+    auto node = std::make_shared<apm_bridge::VehicleNode>();
+    rclcpp::spin(node);
+    rclcpp::shutdown();
     return 0;
 }

@@ -6,25 +6,26 @@
 # base_link_frame: "base_link"
 # axis_frame: "axis_link"
 # lio_frame: "lio_link"
+apm_bridge:
+  ros__parameters:
+    gravity_const: 9.801
+    mass: 2.4
 
-gravity_const: 9.801
-mass: 2.4
+    lipo_cells: 6
+    voltage_compensation: false
 
-lipo_cells: 6
-voltage_compensation: false
+    simulation: true
+    control_frequency: 50.0
 
-simulation: false
-control_freqency: 50
+    motor_parameters:
+      a:  -0.21295089626
+      b:   2.75208143673
+      c: 167.98980891836
+      n: 1
+      voltage_a: 0.0
+      voltage_b: 0.0
 
-motor_parameters:
-  a:  -0.21295089626
-  b:   2.75208143673
-  c: 167.98980891836
-  n: 1
-  voltage_a: 0.0
-  voltage_b: 0.0
-
-init_position:
-  altitude: 100.0
-  latitude: 40.0422820
-  longitude: 116.3714300
+    init_position:
+      altitude: 100.0
+      latitude: 40.0422820
+      longitude: 116.3714300

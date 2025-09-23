@@ -1,19 +1,19 @@
-plugin_blacklist:
-# common
-- actuator_control
-- ftp
-- safety_area
-- hil
-# extras
-- altitude
-- debug_value
-- image_pub
-- px4flow
-- vibration
-- vision_speed_estimate
-- wheel_odometry
-- distance_sensor
-# - obstacle_distance
+/**:
+  ros__parameters:
+    plugin_denylist:
+      # common
+      - actuator_control
+      - ftp
+      - hil
+      # extras
+      - altitude
+      - debug_value
+      - image_pub
+      - px4flow
+      - vibration
+      - vision_speed_estimate
+      - wheel_odometry
+      - optical_flow
 
-plugin_whitelist: []
-#- 'sys_*'
+    # plugin_allowlist:
+    #   - 'sys_*'
