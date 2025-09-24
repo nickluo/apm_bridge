@@ -16,7 +16,6 @@ apm_bridge:
     voltage_compensation: false
 
     simulation: true
-    control_frequency: 50.0
 
     motor_parameters:
       a: 9.4167

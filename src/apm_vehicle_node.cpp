@@ -9,7 +9,7 @@ VehicleNode::VehicleNode()
 {
     this->declare_parameter<double>("gravity_const", 9.80665);
     this->declare_parameter<double>("mass", 2.0);
-    this->declare_parameter<double>("control_frequency", 10.0);
+    // this->declare_parameter<double>("control_frequency", 10.0);
     this->declare_parameter<bool>("simulation", false);
     this->declare_parameter<int>("lipo_cells", 6);
     this->declare_parameter<bool>("voltage_compensation", false);
@@ -25,7 +25,7 @@ VehicleNode::VehicleNode()
 
     this->get_parameter("gravity_const", gravity);
     this->get_parameter("mass", mass);
-    this->get_parameter("control_frequency", control_frequency);
+    // this->get_parameter("control_frequency", control_frequency);
     this->get_parameter("simulation", simulation);
     this->get_parameter("lipo_cells", n_lipo_cells);
     this->get_parameter("voltage_compensation", voltage_compensation);
@@ -185,7 +185,7 @@ void VehicleNode::setupMavlink()
 
     if (simulation)
     {
-        send_request(mavlink_msg::LOCAL_POSITION_NED::MSG_ID, (float)control_frequency*2);
+        send_request(mavlink_msg::LOCAL_POSITION_NED::MSG_ID, 100.0f);
         // send_request(mavlink_msg::LOCAL_POSITION_NED_COV::MSG_ID, (float)control_frequency);
     }
 }
@@ -349,7 +349,7 @@ void VehicleNode::ctrlCommandRawCallback(const quadrotor_msgs::msg::ControlComma
 
 void VehicleNode::ctrlCommandCallback(const quadrotor_msgs::msg::ControlCommand::SharedPtr command)
 {
-    const double delta_t = 1.0/control_frequency;
+    // const double delta_t = 1.0/control_frequency;
     static bool set_unarm = false;
 
     if (set_unarm && armed.load() && 
@@ -380,7 +380,8 @@ void VehicleNode::ctrlCommandCallback(const quadrotor_msgs::msg::ControlCommand:
         target->type_mask = mavros_msgs::msg::AttitudeTarget::IGNORE_PITCH_RATE |
                             mavros_msgs::msg::AttitudeTarget::IGNORE_ROLL_RATE |
                             mavros_msgs::msg::AttitudeTarget::IGNORE_YAW_RATE;
-
+        
+        double delta_t = rclcpp::Time(command->expected_execution_time).seconds();
         tf2::Quaternion delta_q;
         delta_q.setRPY(command->bodyrates.x*delta_t, 
                      command->bodyrates.y*delta_t, 
@@ -416,8 +417,8 @@ void VehicleNode::ctrlCommandCallback(const quadrotor_msgs::msg::ControlCommand:
     }
     target->thrust = (thrust < 0.0) ? 0.0f : ((thrust > 1.0) ? 1.0f : (float)thrust);
 
-    printf("target bodyrate: (%.2f, %.2f, %.2f) rad/s, force: %.2f, thrust: %.2f\n", 
-        target->body_rate.x, target->body_rate.y, target->body_rate.z, command->collective_thrust * mass, thrust);
+    // printf("target bodyrate: (%.2f, %.2f, %.2f) rad/s, force: %.2f, thrust: %.2f\n", 
+    //     target->body_rate.x, target->body_rate.y, target->body_rate.z, command->collective_thrust * mass, thrust);
 
     target_pub->publish(std::move(target));
 }

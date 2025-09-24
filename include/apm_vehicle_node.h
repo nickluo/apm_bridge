@@ -76,7 +76,6 @@ namespace apm_bridge
         quadratic_thrust_model::MotorParams motor_params;
 
         double gravity;
-        double control_frequency;
         bool simulation;
 
         std::mutex mtx_kp;
