@@ -119,7 +119,7 @@ void VehicleNode::setupMavlink()
     auto send_request = [&](uint32_t msg_id, float msg_rate) {
         auto cmdrq = std::make_shared<mavros_msgs::srv::CommandLong::Request>();
         cmdrq->broadcast = false;
-        cmdrq->command = uint16_t(mavlink::ardupilotmega::MAV_CMD::SET_MESSAGE_INTERVAL);
+        cmdrq->command = uint16_t(mavlink::common::MAV_CMD::SET_MESSAGE_INTERVAL);
         cmdrq->confirmation = false;
         cmdrq->param1 = msg_id;
         cmdrq->param2 = 1000000.0f / msg_rate;
