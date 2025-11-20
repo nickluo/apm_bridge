@@ -38,7 +38,6 @@
 #include <geographic_msgs/msg/geo_point_stamped.hpp>
 #include <mavros_msgs/srv/command_home.hpp>
 
-
 namespace apm_bridge
 {
     class VehicleNode : public rclcpp::Node
@@ -105,7 +104,6 @@ namespace apm_bridge
         EMAFilter<double, 5> ema;
 
         double current_heading = 0.0;
-        double current_heading_dot = 0.0;
 
         std::unique_ptr<xfrobot::GimbalControl> gimbal;
         

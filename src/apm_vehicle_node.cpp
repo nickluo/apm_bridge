@@ -126,7 +126,6 @@ VehicleNode::VehicleNode()
                 imu_msg->orientation.y = q_final.y();
                 imu_msg->orientation.z = q_final.z();
                 imu_msg->orientation.w = q_final.w();
-                imu_msg->angular_velocity.z += current_heading_dot;
                
                 imu_msg->header.frame_id = "base_link";
                 gimbal_imu_pub->publish(std::move(imu_msg));
@@ -346,7 +345,6 @@ void VehicleNode::imuCallback(const sensor_msgs::msg::Imu::SharedPtr val)
     double roll, pitch, yaw;
     mat.getRPY(roll, pitch, yaw);
     current_heading = yaw;
-    current_heading_dot = val->angular_velocity.z;
 
     // printf("current_state: %u, armed: %d, hoverable: %u, in_hover: %d, use_rate: %d, collective_force: %.2f N, mass: %.2f kg\n", 
     //     current_state, armed.load(), hoverable, in_hover, use_rate, collective_force, mass);
