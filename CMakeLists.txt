@@ -21,8 +21,21 @@ find_package(tf2_geometry_msgs REQUIRED)
 find_package(quadrotor_msgs REQUIRED)
 find_package(mavros_msgs REQUIRED)
 find_package(mavros REQUIRED)
+find_package(mavlink REQUIRED)
 
 include_directories(include)
+
+add_library(xfgimbal STATIC
+  src/gimbal.cpp
+  src/serial/serial.cc
+  src/serial/unix.cc
+  src/serial/list_ports_linux.cc
+)
+ament_target_dependencies(xfgimbal
+  rclcpp
+  tf2_ros
+  sensor_msgs
+)
 
 add_executable(apm_bridge_node src/apm_vehicle_node.cpp)
 ament_target_dependencies(apm_bridge_node
@@ -36,7 +49,10 @@ ament_target_dependencies(apm_bridge_node
   quadrotor_msgs
   mavros_msgs
   mavros
+  mavlink
 )
+
+target_link_libraries(apm_bridge_node xfgimbal)
 
 install(TARGETS
   apm_bridge_node

@@ -9,6 +9,7 @@
 #include <mavros_msgs/msg/attitude_target.hpp>
 #include <mavros_msgs/msg/extended_state.hpp>
 #include <mavros_msgs/msg/state.hpp>
+#include <mavros_msgs/msg/rc_in.hpp>
 #include <mavros_msgs/srv/message_interval.hpp>
 #include <mavros_msgs/srv/command_long.hpp>
 #include <mavros_msgs/msg/waypoint_list.hpp>
@@ -31,6 +32,7 @@
 
 #include "quadratic_thrust_model.h"
 #include "ema_filter.h"
+#include "gimbal.h"
 
 #include <mavros_msgs/srv/command_bool.hpp>
 #include <geographic_msgs/msg/geo_point_stamped.hpp>
@@ -67,9 +69,11 @@ namespace apm_bridge
         rclcpp::Subscription<mavros_msgs::msg::ExtendedState>::SharedPtr ext_state_sub;
         rclcpp::Subscription<mavros_msgs::msg::State>::SharedPtr state_sub;
         rclcpp::Subscription<sensor_msgs::msg::BatteryState>::SharedPtr battery_sub;
+        rclcpp::Subscription<mavros_msgs::msg::RCIn>::SharedPtr rc_in_sub;
 
         rclcpp::Subscription<mavros_msgs::msg::WaypointList>::SharedPtr waypoint_list_sub;
         rclcpp::Publisher<geographic_msgs::msg::GeoPointStamped>::SharedPtr set_global_pos_pub;
+        rclcpp::Publisher<sensor_msgs::msg::Imu>::SharedPtr gimbal_imu_pub;
 
         rclcpp::Client<mavros_msgs::srv::CommandBool>::SharedPtr command_arming;
         
@@ -98,7 +102,12 @@ namespace apm_bridge
         
         bool voltage_compensation = false;
        
-        EMAFilter<5> ema;
+        EMAFilter<double, 5> ema;
+
+        double current_heading = 0.0;
+        double current_heading_dot = 0.0;
+
+        std::unique_ptr<xfrobot::GimbalControl> gimbal;
         
         void setupMavlink();
 
@@ -112,8 +121,9 @@ namespace apm_bridge
         void extStateCallback(const mavros_msgs::msg::ExtendedState::SharedPtr state);
         void stateCallback(const mavros_msgs::msg::State::SharedPtr state);
         void batteryCallback(const sensor_msgs::msg::BatteryState::SharedPtr state);
+        void rcInCallback(const mavros_msgs::msg::RCIn::SharedPtr rc);
 
-        rclcpp::TimerBase::SharedPtr sync_timer_;
+        rclcpp::TimerBase::SharedPtr gimbal_timer_;
         void syncWorkerCallback();
 
         template<typename T>

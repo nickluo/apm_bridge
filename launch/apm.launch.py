@@ -53,7 +53,10 @@ def generate_launch_description():
         executable='apm_bridge_node',
         name='apm_bridge',
         output='screen',
-        parameters=[os.path.join(apm_bridge_pkg_share, 'parameters', 'airsim_parameters.yaml')],
+        parameters=[
+            os.path.join(apm_bridge_pkg_share, 'parameters', 'airsim_parameters.yaml'),
+            {'gimbal_port': LaunchConfiguration('gimbal_port')},
+        ],
         remappings=[
             ('~/low_level_feedback', '/fpv/low_level_feedback'),
             ('~/control_command', '/fpv/control_command'),
@@ -65,10 +68,14 @@ def generate_launch_description():
     return LaunchDescription([
         # --- Declare Launch Arguments ---
         # These correspond to the <arg> tags in the original XML launch files.
-
+        DeclareLaunchArgument(
+            'gimbal_port',
+            default_value='/dev/ttyTHS2',
+            description='Gimbal connection port.'
+        ),
         DeclareLaunchArgument(
             'fcu_url',
-            default_value='tcp://127.0.0.1:5762',
+            default_value='/dev/ttyTHS1:921600',
             description='FCU connection URL.'
         ),
         DeclareLaunchArgument(

@@ -4,6 +4,8 @@
 using namespace apm_bridge;
 namespace mavlink_msg = mavlink::common::msg;
 
+#define CHANNEL_TRIGGER     6
+
 VehicleNode::VehicleNode()
     : Node("apm_vehicle_node"), ema(50)
 {
@@ -22,6 +24,13 @@ VehicleNode::VehicleNode()
     this->declare_parameter<double>("init_position.altitude", 100.0);
     this->declare_parameter<double>("init_position.latitude", 0.0);
     this->declare_parameter<double>("init_position.longitude", 0.0);
+    this->declare_parameter<std::string>("gimbal_port", "/dev/ttyTHS0");
+
+    std::string gimbal_port;
+    this->get_parameter("gimbal_port", gimbal_port);
+    // std::cout << "========================================== Gimbal port: " << gimbal_port << std::endl;
+    gimbal = std::make_unique<xfrobot::GimbalControl>(gimbal_port);
+    gimbal->run();
 
     this->get_parameter("gravity_const", gravity);
     this->get_parameter("mass", mass);
@@ -39,7 +48,7 @@ VehicleNode::VehicleNode()
 
     quadratic_thrust_model::convert_from_abc(motor_params, a, b, c);
 
-    printf("Motor parameters: A=%.6f, B=%.6f, C=%.6f, n=%d, voltage_a=%.6f, voltage_b=%.6f\n", 
+    RCLCPP_INFO(this->get_logger(), "Motor parameters: A=%.6f, B=%.6f, C=%.6f, n=%d, voltage_a=%.6f, voltage_b=%.6f", 
         motor_params.A, motor_params.B, motor_params.C, motor_params.n_motors, motor_params.voltage_map_a, motor_params.voltage_map_b);
 
     // setupMavlink();
@@ -84,6 +93,11 @@ VehicleNode::VehicleNode()
         rclcpp::QoS(rclcpp::KeepLast(10)).best_effort(), 
         std::bind(&VehicleNode::batteryCallback, this, std::placeholders::_1));
 
+    rc_in_sub = this->create_subscription<mavros_msgs::msg::RCIn>(
+        "/mavros/rc/in", 
+        rclcpp::QoS(rclcpp::KeepLast(10)).best_effort(), 
+        std::bind(&VehicleNode::rcInCallback, this, std::placeholders::_1));
+
     target_pub = this->create_publisher<mavros_msgs::msg::AttitudeTarget>("/mavros/setpoint_raw/attitude", 10);
     ap_feedback_pub = this->create_publisher<quadrotor_msgs::msg::LowLevelFeedback>("~/low_level_feedback", 10);
 
@@ -99,17 +113,41 @@ VehicleNode::VehicleNode()
     });
 
     set_global_pos_pub = this->create_publisher<geographic_msgs::msg::GeoPointStamped>("/mavros/global_position/set_gp_origin", rclcpp::SensorDataQoS());
-    // sync_timer_ = this->create_wall_timer(std::chrono::seconds(10), std::bind(&VehicleNode::syncWorkerCallback, this));
+
+    gimbal_imu_pub = this->create_publisher<sensor_msgs::msg::Imu>("/fpv/gimbal", 10);
+    gimbal_timer_ = this->create_wall_timer(std::chrono::milliseconds(10), [&](){
+        if (gimbal->is_running()) {
+            auto imu_msg = gimbal->getOrientationFLU();
+            if (imu_msg) {
+                tf2::Quaternion q(imu_msg->orientation.x, imu_msg->orientation.y, imu_msg->orientation.z, imu_msg->orientation.w);
+                tf2::Quaternion q_heading(tf2::Vector3(0, 0, 1), current_heading);
+                tf2::Quaternion q_final = q_heading * q;
+                imu_msg->orientation.x = q_final.x();
+                imu_msg->orientation.y = q_final.y();
+                imu_msg->orientation.z = q_final.z();
+                imu_msg->orientation.w = q_final.w();
+                imu_msg->angular_velocity.z += current_heading_dot;
+               
+                imu_msg->header.frame_id = "base_link";
+                gimbal_imu_pub->publish(std::move(imu_msg));
+            }
+        }
+    });
+
+    rclcpp::on_shutdown([&]() {
+        gimbal.reset();
+    });
 }
+
 
 VehicleNode::~VehicleNode() 
 {
-    sync_timer_->cancel();
+    // sync_timer_->cancel();
 }
 
 void VehicleNode::setupMavlink()
 {
-    RCLCPP_WARN(this->get_logger(), "VehicleNode::setupMavlink()");
+    // RCLCPP_WARN(this->get_logger(), "VehicleNode::setupMavlink()");
     auto set_message_interval = this->create_client<mavros_msgs::srv::CommandLong>("/mavros/cmd/command");
     if (!set_message_interval->wait_for_service(std::chrono::seconds(10)) || !set_message_interval->service_is_ready()) {
         RCLCPP_ERROR(this->get_logger(), "Service /mavros/cmd/command not available");
@@ -213,7 +251,7 @@ void VehicleNode::syncWorkerCallback()
             command_set_home->async_send_request(request);
             RCLCPP_WARN(this->get_logger(), "VehicleNode::syncWorkerCallback()");
         }
-        sync_timer_->cancel(); // Stop the timer after successful execution
+        // sync_timer_->cancel(); // Stop the timer after successful execution
     }
 }
 
@@ -239,6 +277,34 @@ void VehicleNode::stateCallback(const mavros_msgs::msg::State::SharedPtr state)
     {
         hoverable = 0;
         rc_manual = true;
+    }
+}
+
+void VehicleNode::rcInCallback(const mavros_msgs::msg::RCIn::SharedPtr rc)
+{
+    static rclcpp::Time last_triggered_time;
+    static bool toggled = false;
+
+    if (rc->channels.size() < 6)
+        return;
+
+    if (!toggled && rc->channels[CHANNEL_TRIGGER] > 1900)
+    {
+        auto current_time = this->now();
+        if (last_triggered_time.nanoseconds() == 0)
+        {
+            last_triggered_time = current_time;
+        }
+        else if ((current_time - last_triggered_time).seconds() > 1.0)
+        {
+            last_triggered_time = rclcpp::Time(0);
+            toggled = true;
+            RCLCPP_INFO(this->get_logger(), "RC Trigger toggle");
+        }
+    } 
+    else if (toggled && rc->channels[CHANNEL_TRIGGER] < 1100)
+    {
+        toggled = false;
     }
 }
 
@@ -274,6 +340,13 @@ void VehicleNode::imuCallback(const sensor_msgs::msg::Imu::SharedPtr val)
         last_state = current_state;
         ema.reset();
     }
+
+    tf2::Quaternion orientation(val->orientation.x, val->orientation.y, val->orientation.z, val->orientation.w);
+    tf2::Matrix3x3 mat(orientation);
+    double roll, pitch, yaw;
+    mat.getRPY(roll, pitch, yaw);
+    current_heading = yaw;
+    current_heading_dot = val->angular_velocity.z;
 
     // printf("current_state: %u, armed: %d, hoverable: %u, in_hover: %d, use_rate: %d, collective_force: %.2f N, mass: %.2f kg\n", 
     //     current_state, armed.load(), hoverable, in_hover, use_rate, collective_force, mass);
@@ -482,6 +555,7 @@ int main(int argc, char **argv)
     rclcpp::init(argc, argv);
     auto node = std::make_shared<apm_bridge::VehicleNode>();
     rclcpp::spin(node);
+    node.reset();
     rclcpp::shutdown();
     return 0;
 }

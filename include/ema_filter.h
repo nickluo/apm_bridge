@@ -5,12 +5,12 @@
 
 namespace apm_bridge {
 
-template<std::uint32_t N = 1>
+template<typename T, std::uint32_t N = 1>
 class EMAFilter
 {
 private:
-    const double alpha;
-    std::array<double, N> data;
+    const T alpha;
+    std::array<T, N> data;
     std::array<bool, N> set;
 public:
     explicit EMAFilter(int n)
@@ -24,7 +24,7 @@ public:
         data.fill(0);
         set.fill(false);
     }
-    double operator[](int index) const
+    T operator[](int index) const
     {
         return data[index];
     }
@@ -32,7 +32,7 @@ public:
     {
         return set[index];
     }
-    double filter(double val, int index = 0)
+    T filter(T val, int index = 0)
     {
         if (!set[index])
         {
@@ -46,7 +46,7 @@ public:
         return data[index];
     }
 
-    void filter(const double *val, double *result)
+    void filter(const T *val, T *result)
     {
         for(auto i=0u; i<N; ++i)
             result[i] = filter(val[i], i);
