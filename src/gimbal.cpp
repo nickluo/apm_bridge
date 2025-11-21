@@ -26,8 +26,13 @@ using namespace xfrobot;
 #define OP_TYPE_REAL_SPEED 2    // 真实角速度
 
 #define SERIAL_READ_TIMEOUT_MS 10
-#define PITCH_ROLL_SPEED_SCALE 1.2f // 速度控制比例系数
-#define YAW_SPEED_SCALE 1.2f // 速度控制比例系数
+#define PITCH_ROLL_SPEED_SCALE  12.0f // 速度控制比例系数
+#define YAW_SPEED_SCALE         10.0f // 速度控制比例系数
+
+#define MAX_ANGLE_SPEED         150.0f // deg/s
+#define MIN_PITCH_LIMIT        -135.0f // deg
+#define MAX_PITCH_LIMIT         40.0f  // deg
+#define MAX_ROLL_LIMIT          50.0f  // deg 
 
 static uint16_t CalculateCrc16(uint8_t *ptr, uint8_t len)
 {
@@ -100,6 +105,7 @@ void GimbalControl::run()
         bool first_run = true;
         float last_yaw_encoder = 0.0f;
         float omega_yaw = 0.0f;
+        float delta = 0.01f;
 
         start_stop(true);
         while (running.load())
@@ -110,9 +116,43 @@ void GimbalControl::run()
                 auto current_time = std::chrono::high_resolution_clock::now();
                 
                 roll_exp = -last_response.cam_angle[0]  * 0.01f * PITCH_ROLL_SPEED_SCALE;
+                if (roll_exp > MAX_ANGLE_SPEED)
+                    roll_exp = MAX_ANGLE_SPEED;
+                else if (roll_exp < -MAX_ANGLE_SPEED)
+                    roll_exp = -MAX_ANGLE_SPEED;
                 pitch_exp = -last_response.cam_angle[1] * 0.01f * PITCH_ROLL_SPEED_SCALE;
+                if (pitch_exp > MAX_ANGLE_SPEED)
+                    pitch_exp = MAX_ANGLE_SPEED;
+                else if (pitch_exp < -MAX_ANGLE_SPEED)
+                    pitch_exp = -MAX_ANGLE_SPEED;
 
                 float current_yaw_encoder = last_response.mtr_angle[2] * 0.01f;
+
+                float mtr_roll = last_response.mtr_angle[1] * 0.01f;
+                bool max = false;
+                if (std::abs(mtr_roll) >= MAX_ROLL_LIMIT)
+                {
+                    roll_exp = 0.0f;
+                    max = true;
+                }
+                float mtr_pitch = last_response.mtr_angle[0] * 0.01f;
+                if (mtr_pitch <= MIN_PITCH_LIMIT || mtr_pitch >= MAX_PITCH_LIMIT)
+                {
+                    pitch_exp = 0.0f;
+                    max = true;
+                }
+                
+                // printf("MTR_ROLL: %.2f MTR_PITCH: %.2f | CMD_ROLL_EXP: %.2f CMD_PITCH_EXP: %.2f\n",
+                //     mtr_roll, mtr_pitch, roll_exp, pitch_exp);
+                
+                float r_ratio = 1.0f - std::abs(mtr_roll) / MAX_ROLL_LIMIT;
+                float p_ratio = 1.0f - mtr_pitch / (std::signbit(mtr_pitch) ? MIN_PITCH_LIMIT : MAX_PITCH_LIMIT);
+                float scale = std::min(r_ratio, p_ratio);
+                // scale *= scale; // 二次降低控制增益
+                if (scale < 0.01f)
+                    scale = 0.01f;
+                else if (scale > 1.0f)
+                    scale = 1.0f;
 
                 if (first_run)
                 {
@@ -120,13 +160,29 @@ void GimbalControl::run()
                 }
                 else
                 {
-                    auto delta = std::chrono::duration_cast<std::chrono::duration<float, std::chrono::seconds::period>>(current_time - last_time).count();
+                    delta = std::chrono::duration_cast<std::chrono::duration<float, std::chrono::seconds::period>>(current_time - last_time).count();
                     omega_yaw = -(current_yaw_encoder - last_yaw_encoder) / delta; // deg/s
                 }
                 last_time = current_time;
                 last_yaw_encoder = current_yaw_encoder;
+                
+                if (max)
+                {
+                    // Keep low speed when reaching limit
+                    yaw_exp = std::signbit(current_yaw_encoder) ? MAX_ANGLE_SPEED*0.01f : -MAX_ANGLE_SPEED*0.01f;
+                }
+                else
+                {
+                    yaw_exp = -current_yaw_encoder * YAW_SPEED_SCALE * scale;
+                    if (std::abs(yaw_exp) < 0.1f)
+                        yaw_exp = 0.0f;
+                    else if (yaw_exp > MAX_ANGLE_SPEED)
+                        yaw_exp = MAX_ANGLE_SPEED;
+                    else if (yaw_exp < -MAX_ANGLE_SPEED)
+                        yaw_exp = -MAX_ANGLE_SPEED;
+                }
 
-                yaw_exp = -current_yaw_encoder * YAW_SPEED_SCALE;
+                // printf("Current Yaw rate: %.2f deg/s  Expected Yaw rate: %.2f deg/s\n", omega_yaw, yaw_exp);
 
                 // 发送控制命令
                 sendManualControl2(yaw_exp, pitch_exp, roll_exp);
@@ -136,7 +192,7 @@ void GimbalControl::run()
                     euler_angles_FLU[0] =   last_response.cam_angle[0] * 0.01f;
                     euler_angles_FLU[1] = - last_response.cam_angle[1] * 0.01f;
                     euler_angles_FLU[2] = - current_yaw_encoder;
-                    ema_filter.filter(last_response.cam_rate[0] * 0.1f, 0);
+                    ema_filter.filter( last_response.cam_rate[0] * 0.1f, 0);
                     ema_filter.filter(-last_response.cam_rate[1] * 0.1f, 1);
                     ema_filter.filter(omega_yaw, 2);
                     // printf("Roll rate: %.2f Pitch rate: %.2f Yaw rate: %.2f deg/s\n", 
@@ -154,7 +210,7 @@ void GimbalControl::run()
                 // 无法读取到包，保持当前期望值不变
                 sendManualControl2(yaw_exp, pitch_exp, roll_exp);
             }
-            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
     });
 }
@@ -374,17 +430,17 @@ void GimbalControl::sendManualControl2(float yaw_dps, float pitch_dps, float rol
     // 滚转轴
     packet.gbc[0].wk_mode = WK_MODE_LOCK;
     packet.gbc[0].op_type = OP_TYPE_REAL_SPEED; //OP_TYPE_ANGLE;
-    packet.gbc[0].op_value = static_cast<int16_t>(roll_dps * 100.0f);
+    packet.gbc[0].op_value = static_cast<int16_t>(roll_dps * 10.0f);
 
     // 俯仰轴
     packet.gbc[1].wk_mode = WK_MODE_LOCK;
     packet.gbc[1].op_type = OP_TYPE_REAL_SPEED;
-    packet.gbc[1].op_value = static_cast<int16_t>(pitch_dps * 100.0f);
+    packet.gbc[1].op_value = static_cast<int16_t>(pitch_dps * 10.0f);
 
     // 偏航轴
     packet.gbc[2].wk_mode = WK_MODE_LOCK;
     packet.gbc[2].op_type = OP_TYPE_REAL_SPEED;
-    packet.gbc[2].op_value = static_cast<int16_t>(yaw_dps * 100.0f);
+    packet.gbc[2].op_value = static_cast<int16_t>(yaw_dps * 10.0f);
 
     // 4. 填充载机数据 (重要: 示例中设为无效)
     packet.uav.valid = 0; // 0 = 无效
