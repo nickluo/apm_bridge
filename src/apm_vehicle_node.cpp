@@ -51,8 +51,6 @@ VehicleNode::VehicleNode()
     RCLCPP_INFO(this->get_logger(), "Motor parameters: A=%.6f, B=%.6f, C=%.6f, n=%d, voltage_a=%.6f, voltage_b=%.6f", 
         motor_params.A, motor_params.B, motor_params.C, motor_params.n_motors, motor_params.voltage_map_a, motor_params.voltage_map_b);
 
-    // setupMavlink();
-
     tf_br = std::make_shared<tf2_ros::TransformBroadcaster>(this);
     tf_br_static = std::make_shared<tf2_ros::StaticTransformBroadcaster>(this);
 
@@ -102,6 +100,9 @@ VehicleNode::VehicleNode()
     ap_feedback_pub = this->create_publisher<quadrotor_msgs::msg::LowLevelFeedback>("~/low_level_feedback", 10);
 
     command_arming = this->create_client<mavros_msgs::srv::CommandBool>("/mavros/cmd/arming");
+    
+    status_pub = this->create_publisher<mavros_msgs::msg::StatusText>("/mavros/statustext/send", 10);
+    trigger_pub = this->create_publisher<std_msgs::msg::Header>("/fpv/tracker_trigger", 10);
 
     waypoint_list_sub = this->create_subscription<mavros_msgs::msg::WaypointList>("/mavros/mission/waypoints", 10, 
         [&](const mavros_msgs::msg::WaypointList::SharedPtr msg) {
@@ -112,7 +113,8 @@ VehicleNode::VehicleNode()
             waypoint_list_sub.reset();
     });
 
-    set_global_pos_pub = this->create_publisher<geographic_msgs::msg::GeoPointStamped>("/mavros/global_position/set_gp_origin", rclcpp::SensorDataQoS());
+    // set_global_pos_pub = this->create_publisher<geographic_msgs::msg::GeoPointStamped>("/mavros/global_position/set_gp_origin", rclcpp::SensorDataQoS());
+    // sync_timer_ = this->create_wall_timer(std::chrono::seconds(5), std::bind(&VehicleNode::syncWorkerCallback, this));
 
     gimbal_imu_pub = this->create_publisher<sensor_msgs::msg::Imu>("/fpv/gimbal", 10);
     gimbal_timer_ = this->create_wall_timer(std::chrono::milliseconds(10), [&](){
@@ -225,34 +227,46 @@ void VehicleNode::setupMavlink()
         send_request(mavlink_msg::LOCAL_POSITION_NED::MSG_ID, 100.0f);
         // send_request(mavlink_msg::LOCAL_POSITION_NED_COV::MSG_ID, (float)control_frequency);
     }
-}
 
-void VehicleNode::syncWorkerCallback()
-{
-    geographic_msgs::msg::GeoPointStamped pos;
-    this->get_parameter("init_position.altitude", pos.position.altitude);
-    this->get_parameter("init_position.latitude", pos.position.latitude);
-    this->get_parameter("init_position.longitude", pos.position.longitude);
-
-    if (set_global_pos_pub->get_subscription_count() > 0)
-    {
-        set_global_pos_pub->publish(pos);
-    
-        auto command_set_home = this->create_client<mavros_msgs::srv::CommandHome>("/mavros/cmd/set_home");
-        if(command_set_home->wait_for_service()) //(std::chrono::seconds(1)))
+    status_timer_ = this->create_wall_timer(std::chrono::seconds(1), [&](){
+        if (status_counter_++ >= 3)
         {
-            auto request = std::make_shared<mavros_msgs::srv::CommandHome::Request>();
-            request->current_gps = 0;
-            request->yaw = 0;
-            request->altitude = pos.position.altitude;
-            request->latitude = pos.position.latitude;
-            request->longitude = pos.position.longitude;
-            command_set_home->async_send_request(request);
-            RCLCPP_WARN(this->get_logger(), "VehicleNode::syncWorkerCallback()");
+            status_timer_->cancel();
+            return;
         }
-        // sync_timer_->cancel(); // Stop the timer after successful execution
-    }
+        auto msg = std::make_unique<mavros_msgs::msg::StatusText>();
+        msg->severity = mavros_msgs::msg::StatusText::WARNING;
+        msg->text= "APM Bridge Node Ready";
+        status_pub->publish(std::move(msg));
+    });
 }
+
+// void VehicleNode::syncWorkerCallback()
+// {
+//     geographic_msgs::msg::GeoPointStamped pos;
+//     this->get_parameter("init_position.altitude", pos.position.altitude);
+//     this->get_parameter("init_position.latitude", pos.position.latitude);
+//     this->get_parameter("init_position.longitude", pos.position.longitude);
+
+//     if (set_global_pos_pub->get_subscription_count() > 0)
+//     {
+//         set_global_pos_pub->publish(pos);
+    
+//         auto command_set_home = this->create_client<mavros_msgs::srv::CommandHome>("/mavros/cmd/set_home");
+//         if(command_set_home->wait_for_service()) //(std::chrono::seconds(1)))
+//         {
+//             auto request = std::make_shared<mavros_msgs::srv::CommandHome::Request>();
+//             request->current_gps = 0;
+//             request->yaw = 0;
+//             request->altitude = pos.position.altitude;
+//             request->latitude = pos.position.latitude;
+//             request->longitude = pos.position.longitude;
+//             command_set_home->async_send_request(request);
+//             RCLCPP_WARN(this->get_logger(), "VehicleNode::syncWorkerCallback()");
+//         }
+//         sync_timer_->cancel(); // Stop the timer after successful execution
+//     }
+// }
 
 void VehicleNode::extStateCallback(const mavros_msgs::msg::ExtendedState::SharedPtr state)
 {
@@ -283,25 +297,38 @@ void VehicleNode::rcInCallback(const mavros_msgs::msg::RCIn::SharedPtr rc)
 {
     static rclcpp::Time last_triggered_time;
     static bool toggled = false;
+    static bool trigger_state = false;
 
     if (rc->channels.size() < 6)
         return;
 
-    if (!toggled && rc->channels[CHANNEL_TRIGGER] > 1900)
+    if (!toggled)
     {
-        auto current_time = this->now();
-        if (last_triggered_time.nanoseconds() == 0)
+        if (rc->channels[CHANNEL_TRIGGER] > 1900)
         {
-            last_triggered_time = current_time;
+            auto current_time = this->now();
+            if (last_triggered_time.nanoseconds() == 0)
+            {
+                last_triggered_time = current_time;
+            }
+            else if ((current_time - last_triggered_time).seconds() > 0.5)
+            {
+                last_triggered_time = rclcpp::Time(0);
+                toggled = true;
+                RCLCPP_INFO(this->get_logger(), "RC Trigger toggle");
+                trigger_state = !trigger_state;
+                auto msg = std::make_unique<std_msgs::msg::Header>();
+                msg->stamp = this->now();
+                msg->frame_id = trigger_state ? "ON" : "OFF";
+                trigger_pub->publish(std::move(msg));
+            }
         }
-        else if ((current_time - last_triggered_time).seconds() > 1.0)
+        else
         {
             last_triggered_time = rclcpp::Time(0);
-            toggled = true;
-            RCLCPP_INFO(this->get_logger(), "RC Trigger toggle");
         }
-    } 
-    else if (toggled && rc->channels[CHANNEL_TRIGGER] < 1100)
+    }
+    else if (rc->channels[CHANNEL_TRIGGER] < 1100)
     {
         toggled = false;
     }

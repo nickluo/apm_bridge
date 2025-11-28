@@ -4,6 +4,7 @@
 
 #include <std_msgs/msg/float64.hpp>
 #include <std_msgs/msg/bool.hpp>
+#include <std_msgs/msg/header.hpp>
 #include "quadrotor_msgs/msg/control_command.hpp"
 #include "quadrotor_msgs/msg/low_level_feedback.hpp"
 #include <mavros_msgs/msg/attitude_target.hpp>
@@ -13,6 +14,7 @@
 #include <mavros_msgs/srv/message_interval.hpp>
 #include <mavros_msgs/srv/command_long.hpp>
 #include <mavros_msgs/msg/waypoint_list.hpp>
+#include <mavros_msgs/msg/status_text.hpp>
 #include <sensor_msgs/msg/battery_state.hpp>
 #include <sensor_msgs/msg/fluid_pressure.hpp>
 #include <sensor_msgs/msg/temperature.hpp>
@@ -73,6 +75,8 @@ namespace apm_bridge
         rclcpp::Subscription<mavros_msgs::msg::WaypointList>::SharedPtr waypoint_list_sub;
         rclcpp::Publisher<geographic_msgs::msg::GeoPointStamped>::SharedPtr set_global_pos_pub;
         rclcpp::Publisher<sensor_msgs::msg::Imu>::SharedPtr gimbal_imu_pub;
+        rclcpp::Publisher<mavros_msgs::msg::StatusText>::SharedPtr status_pub;
+        rclcpp::Publisher<std_msgs::msg::Header>::SharedPtr trigger_pub;
 
         rclcpp::Client<mavros_msgs::srv::CommandBool>::SharedPtr command_arming;
         
@@ -122,7 +126,10 @@ namespace apm_bridge
         void rcInCallback(const mavros_msgs::msg::RCIn::SharedPtr rc);
 
         rclcpp::TimerBase::SharedPtr gimbal_timer_;
-        void syncWorkerCallback();
+        rclcpp::TimerBase::SharedPtr status_timer_;
+        int status_counter_ = 0;
+        // rclcpp::TimerBase::SharedPtr sync_timer_;
+        // void syncWorkerCallback();
 
         template<typename T>
         bool executeService(
