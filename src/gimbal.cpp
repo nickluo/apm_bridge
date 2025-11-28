@@ -136,7 +136,7 @@ void GimbalControl::run()
                     max = true;
                 }
                 float mtr_pitch = last_response.mtr_angle[0] * 0.01f;
-                if (mtr_pitch <= MIN_PITCH_LIMIT || mtr_pitch >= MAX_PITCH_LIMIT)
+                if (std::abs(last_response.mtr_angle[0] - last_response.cam_angle[1]) < MAX_PITCH_LIMIT*100 && (mtr_pitch <= MIN_PITCH_LIMIT || mtr_pitch >= MAX_PITCH_LIMIT))
                 {
                     pitch_exp = 0.0f;
                     max = true;
