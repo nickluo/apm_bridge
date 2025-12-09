@@ -93,6 +93,11 @@ VehicleNode::VehicleNode()
         "/mavros/rc/in", 
         rclcpp::QoS(rclcpp::KeepLast(10)).best_effort(), 
         std::bind(&VehicleNode::rcInCallback, this, std::placeholders::_1));
+    
+    param_event_sub = this->create_subscription<mavros_msgs::msg::ParamEvent>(
+        "/mavros/param/event", 
+        rclcpp::QoS(rclcpp::KeepLast(10)).best_effort(), 
+        std::bind(&VehicleNode::paramEventCallback, this, std::placeholders::_1));
 
     target_pub = this->create_publisher<mavros_msgs::msg::AttitudeTarget>("/mavros/setpoint_raw/attitude", 10);
     ap_feedback_pub = this->create_publisher<quadrotor_msgs::msg::LowLevelFeedback>("~/low_level_feedback", 10);
@@ -173,43 +178,6 @@ void VehicleNode::setupMavlink()
         future.wait();
     };
 
-    // auto set_message_interval = this->create_client<mavros_msgs::srv::MessageInterval>("/mavros/set_message_interval");
-    // if (!set_message_interval->wait_for_service(std::chrono::seconds(10)) || !set_message_interval->service_is_ready()) {
-    //     RCLCPP_ERROR(this->get_logger(), "Service /mavros/set_message_interval not available");
-    //     return;
-    // }
-
-    // RCLCPP_WARN(this->get_logger(), "Setting message intervals for various MAVLink messages...");
-    
-    // auto send_request = [&](uint32_t msg_id, float msg_rate) {
-    //     auto request = std::make_shared<mavros_msgs::srv::MessageInterval::Request>();
-    //     request->message_id = msg_id;
-    //     request->message_rate = msg_rate;
-    //     // auto result = set_message_interval->async_send_request(request,
-    //     //     [this, msg_id, msg_rate](rclcpp::Client<mavros_msgs::srv::MessageInterval>::SharedFuture future) {
-    //     //         RCLCPP_ERROR(this->get_logger(), "set_message_interval callback called");
-    //     //         if (future.valid()) {
-    //     //             RCLCPP_INFO(this->get_logger(), "Set message interval for msg_id %u to %.2f Hz", msg_id, msg_rate);
-    //     //         } else {
-    //     //             RCLCPP_ERROR(this->get_logger(), "Failed to set message interval for msg_id %u", msg_id);
-    //     //         }
-    //     //     });
-    //     // bool suc = executeService<mavros_msgs::srv::MessageInterval>(set_message_interval, request);
-    //     // if (suc)
-    //     // {
-    //     //     RCLCPP_INFO(this->get_logger(), "Set message interval for msg_id %u to %.2f Hz", msg_id, msg_rate);
-    //     // } else {
-    //     //     RCLCPP_ERROR(this->get_logger(), "Failed to set message interval for msg_id %u", msg_id);
-    //     // }
-    //     // auto result = set_message_interval->async_send_request(request);
-    //     // if (rclcpp::spin_until_future_complete(shared_from_this(), result) == rclcpp::FutureReturnCode::SUCCESS)
-    //     // {
-    //     //     RCLCPP_INFO(this->get_logger(), "Set message interval for msg_id %u to %.2f Hz", msg_id, msg_rate);
-    //     // } else {
-    //     //     RCLCPP_ERROR(this->get_logger(), "Failed to set message interval for msg_id %u", msg_id);
-    //     // }
-    // };
-
     send_request(mavlink_msg::ATTITUDE_TARGET::MSG_ID, 100.0f);
     send_request(mavlink_msg::EXTENDED_SYS_STATE::MSG_ID, 10.0f);
     send_request(mavlink_msg::SCALED_PRESSURE::MSG_ID, 10.0f);
@@ -226,44 +194,6 @@ void VehicleNode::setupMavlink()
         // send_request(mavlink_msg::LOCAL_POSITION_NED_COV::MSG_ID, (float)control_frequency);
     }
 
-    auto get_param_client = this->create_client<mavros_msgs::srv::ParamGet>("/mavros/param/get");
-    if (!get_param_client->wait_for_service(std::chrono::seconds(10)) || !get_param_client->service_is_ready()) {
-        RCLCPP_ERROR(this->get_logger(), "Service /mavros/param/get not available");
-        return;
-    }
-
-    auto get_param = [&](const std::string& param_id) -> mavros_msgs::msg::ParamValue {
-        auto cmdrq = std::make_shared<mavros_msgs::srv::ParamGet::Request>();
-        cmdrq->param_id = param_id;
-
-        // 发送异步请求
-        auto result_future = get_param_client->async_send_request(cmdrq);
-
-        // 等待结果 (简单阻塞式写法，实际工程建议用回调或状态机)
-        if (rclcpp::spin_until_future_complete(this->get_node_base_interface(), result_future) == rclcpp::FutureReturnCode::SUCCESS) {
-            auto response = result_future.get();
-            if (response->success) {
-                // Ardupilot 参数主要分为 integer 和 real (float)
-                // 通常 param_value.integer 用于整数，param_value.real 用于浮点
-                if (response->value.integer != 0 || response->value.real == 0.0) { 
-                     RCLCPP_INFO(this->get_logger(), "Param %s (Int): %ld", param_id.c_str(), response->value.integer);
-                }
-                if (response->value.real != 0.0) {
-                     RCLCPP_INFO(this->get_logger(), "Param %s (Float): %f", param_id.c_str(), response->value.real);
-                }
-                return response->value;
-            } else {
-                RCLCPP_ERROR(this->get_logger(), "Failed to get param: %s", param_id.c_str());
-            }
-        } else {
-            RCLCPP_ERROR(this->get_logger(), "Service call failed");
-        }
-        return mavros_msgs::msg::ParamValue {};
-    };
-
-    motor_params.spin_k = get_param("MOT_THST_EXPO").real;
-    motor_params.volt_max = get_param("MOT_BAT_VOLT_MAX").real;
-
     status_timer_ = this->create_wall_timer(std::chrono::seconds(1), [&](){
         if (status_counter_++ >= 3)
         {
@@ -275,6 +205,20 @@ void VehicleNode::setupMavlink()
         msg->text= "APM Bridge Node Ready";
         status_pub->publish(std::move(msg));
     });
+}
+
+void VehicleNode::paramEventCallback(const mavros_msgs::msg::ParamEvent::SharedPtr event)
+{
+    if (event->value.type == rcl_interfaces::msg::ParameterType::PARAMETER_DOUBLE && event->param_id == "MOT_THST_EXPO")
+    {
+        motor_params.spin_k = event->value.double_value;
+        RCLCPP_INFO(this->get_logger(), "Updated motor spin_k to %.6f", motor_params.spin_k);
+    }
+    else if (event->value.type == rcl_interfaces::msg::ParameterType::PARAMETER_DOUBLE && event->param_id == "MOT_BAT_VOLT_MAX")
+    {
+        motor_params.volt_max = event->value.double_value;
+        RCLCPP_INFO(this->get_logger(), "Updated motor volt_max to %.6f", motor_params.volt_max);
+    }
 }
 
 // void VehicleNode::syncWorkerCallback()

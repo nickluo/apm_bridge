@@ -13,9 +13,9 @@
 #include <mavros_msgs/msg/rc_in.hpp>
 #include <mavros_msgs/srv/message_interval.hpp>
 #include <mavros_msgs/srv/command_long.hpp>
-#include <mavros_msgs/srv/param_get.hpp>
 #include <mavros_msgs/msg/waypoint_list.hpp>
 #include <mavros_msgs/msg/status_text.hpp>
+#include <mavros_msgs/msg/param_event.hpp>
 #include <sensor_msgs/msg/battery_state.hpp>
 #include <sensor_msgs/msg/fluid_pressure.hpp>
 #include <sensor_msgs/msg/temperature.hpp>
@@ -72,6 +72,7 @@ namespace apm_bridge
         rclcpp::Subscription<mavros_msgs::msg::State>::SharedPtr state_sub;
         rclcpp::Subscription<sensor_msgs::msg::BatteryState>::SharedPtr battery_sub;
         rclcpp::Subscription<mavros_msgs::msg::RCIn>::SharedPtr rc_in_sub;
+        rclcpp::Subscription<mavros_msgs::msg::ParamEvent>::SharedPtr param_event_sub;
 
         rclcpp::Subscription<mavros_msgs::msg::WaypointList>::SharedPtr waypoint_list_sub;
         rclcpp::Publisher<geographic_msgs::msg::GeoPointStamped>::SharedPtr set_global_pos_pub;
@@ -125,6 +126,7 @@ namespace apm_bridge
         void stateCallback(const mavros_msgs::msg::State::SharedPtr state);
         void batteryCallback(const sensor_msgs::msg::BatteryState::SharedPtr state);
         void rcInCallback(const mavros_msgs::msg::RCIn::SharedPtr rc);
+        void paramEventCallback(const mavros_msgs::msg::ParamEvent::SharedPtr event);
 
         rclcpp::TimerBase::SharedPtr gimbal_timer_;
         rclcpp::TimerBase::SharedPtr status_timer_;
