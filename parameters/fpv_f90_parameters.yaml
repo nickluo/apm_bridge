@@ -6,24 +6,22 @@
 # base_link_frame: "base_link"
 # axis_frame: "axis_link"
 # lio_frame: "lio_link"
-
 apm_bridge:
   ros__parameters:
     gravity_const: 9.801
-    mass: 23.0
+    mass: 2.05
 
-    lipo_cells: 12
-    voltage_compensation: false
+    lipo_cells: 6
+    voltage_compensation: true
 
     simulation: true
 
     motor_parameters:
-      a: 1.0
-      b: -267.5
-      c: -71551.25
-      n: 1
-      voltage_a: 0.0
-      voltage_b: 0.0
+      A:  0.0000509418
+      B: -0.001859503
+      C:  0.057755174
+      D:  0.005619544
+      n:  4
 
     init_position:
       altitude: 100.0

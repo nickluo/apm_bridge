@@ -18,15 +18,11 @@ apm_bridge:
     simulation: true
 
     motor_parameters:
-      a: 9.4167
-      b: 17.261
-      c: -0.8678
-      # a:   0.0
-      # b:   29.502
-      # c:   -4.4069
-      n:   4
-      voltage_a: 0.0
-      voltage_b: 0.0
+      A:  0.0000793607
+      B: -0.004194295
+      C:  0.104836283
+      D: -0.231665421
+      n:  4
 
     init_position:
       altitude: 100.0

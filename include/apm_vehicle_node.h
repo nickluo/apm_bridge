@@ -13,6 +13,7 @@
 #include <mavros_msgs/msg/rc_in.hpp>
 #include <mavros_msgs/srv/message_interval.hpp>
 #include <mavros_msgs/srv/command_long.hpp>
+#include <mavros_msgs/srv/param_get.hpp>
 #include <mavros_msgs/msg/waypoint_list.hpp>
 #include <mavros_msgs/msg/status_text.hpp>
 #include <sensor_msgs/msg/battery_state.hpp>
@@ -49,9 +50,9 @@ namespace apm_bridge
         ~VehicleNode();
 
     private:
-
+        static constexpr double kBatteryFullVoltagePerCell = 4.2;
         static constexpr double kBatteryLowVoltagePerCell = 3.6;
-        static constexpr double kBatteryCriticalVoltagePerCell = 3.4;
+        static constexpr double kBatteryCriticalVoltagePerCell = 3.3;
         static constexpr double kBatteryInvalidVoltagePerCell = 3.0;
 
         std::shared_ptr<tf2_ros::TransformBroadcaster> tf_br;

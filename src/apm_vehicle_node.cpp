@@ -15,12 +15,11 @@ VehicleNode::VehicleNode()
     this->declare_parameter<bool>("simulation", false);
     this->declare_parameter<int>("lipo_cells", 6);
     this->declare_parameter<bool>("voltage_compensation", false);
-    this->declare_parameter<double>("motor_parameters.a", 0.0);
-    this->declare_parameter<double>("motor_parameters.b", 0.0);
-    this->declare_parameter<double>("motor_parameters.c", 0.0);
+    this->declare_parameter<double>("motor_parameters.A", 0.0);
+    this->declare_parameter<double>("motor_parameters.B", 0.0);
+    this->declare_parameter<double>("motor_parameters.C", 0.0);
+    this->declare_parameter<double>("motor_parameters.D", 0.0);
     this->declare_parameter<int>("motor_parameters.n", 1);
-    this->declare_parameter<double>("motor_parameters.voltage_a", 0.0);
-    this->declare_parameter<double>("motor_parameters.voltage_b", 0.0);
     this->declare_parameter<double>("init_position.altitude", 100.0);
     this->declare_parameter<double>("init_position.latitude", 0.0);
     this->declare_parameter<double>("init_position.longitude", 0.0);
@@ -38,18 +37,17 @@ VehicleNode::VehicleNode()
     this->get_parameter("simulation", simulation);
     this->get_parameter("lipo_cells", n_lipo_cells);
     this->get_parameter("voltage_compensation", voltage_compensation);
-    double a, b, c;
-    this->get_parameter("motor_parameters.a", a);
-    this->get_parameter("motor_parameters.b", b);
-    this->get_parameter("motor_parameters.c", c);
+    this->get_parameter("motor_parameters.A", motor_params.A);
+    this->get_parameter("motor_parameters.B", motor_params.B);
+    this->get_parameter("motor_parameters.C", motor_params.C);
+    this->get_parameter("motor_parameters.D", motor_params.D);
     this->get_parameter("motor_parameters.n", motor_params.n_motors);
-    this->get_parameter("motor_parameters.voltage_a", motor_params.voltage_map_a);
-    this->get_parameter("motor_parameters.voltage_b", motor_params.voltage_map_b);
 
-    quadratic_thrust_model::convert_from_abc(motor_params, a, b, c);
+    motor_params.spin_k = 0.0;
+    motor_params.volt_max = n_lipo_cells * kBatteryFullVoltagePerCell;
 
-    RCLCPP_INFO(this->get_logger(), "Motor parameters: A=%.6f, B=%.6f, C=%.6f, n=%d, voltage_a=%.6f, voltage_b=%.6f", 
-        motor_params.A, motor_params.B, motor_params.C, motor_params.n_motors, motor_params.voltage_map_a, motor_params.voltage_map_b);
+    RCLCPP_INFO(this->get_logger(), "Motor parameters: A=%.6f, B=%.6f, C=%.6f, D=%.6f, n=%d, voltage_max=%.6f, spin_k=%.6f", 
+        motor_params.A, motor_params.B, motor_params.C, motor_params.D, motor_params.n_motors, motor_params.volt_max, motor_params.spin_k);
 
     tf_br = std::make_shared<tf2_ros::TransformBroadcaster>(this);
     tf_br_static = std::make_shared<tf2_ros::StaticTransformBroadcaster>(this);
@@ -213,11 +211,11 @@ void VehicleNode::setupMavlink()
     // };
 
     send_request(mavlink_msg::ATTITUDE_TARGET::MSG_ID, 100.0f);
-    send_request(mavlink_msg::EXTENDED_SYS_STATE::MSG_ID, 5.0f);
-    send_request(mavlink_msg::SCALED_PRESSURE::MSG_ID, 5.0f);
-    send_request(mavlink_msg::BATTERY_STATUS::MSG_ID, 1.0f);
-    send_request(mavlink_msg::RC_CHANNELS::MSG_ID, 50.0f);
-    send_request(mavlink_msg::DISTANCE_SENSOR::MSG_ID, 10.0f);
+    send_request(mavlink_msg::EXTENDED_SYS_STATE::MSG_ID, 10.0f);
+    send_request(mavlink_msg::SCALED_PRESSURE::MSG_ID, 10.0f);
+    send_request(mavlink_msg::BATTERY_STATUS::MSG_ID, 10.0f);
+    send_request(mavlink_msg::RC_CHANNELS::MSG_ID, 10.0f);
+    // send_request(mavlink_msg::DISTANCE_SENSOR::MSG_ID, 10.0f);
 
     send_request(mavlink_msg::ATTITUDE_QUATERNION::MSG_ID, 200.0f);
     send_request(mavlink_msg::SCALED_IMU::MSG_ID, 200.0f);
@@ -227,6 +225,44 @@ void VehicleNode::setupMavlink()
         send_request(mavlink_msg::LOCAL_POSITION_NED::MSG_ID, 100.0f);
         // send_request(mavlink_msg::LOCAL_POSITION_NED_COV::MSG_ID, (float)control_frequency);
     }
+
+    auto get_param_client = this->create_client<mavros_msgs::srv::ParamGet>("/mavros/param/get");
+    if (!get_param_client->wait_for_service(std::chrono::seconds(10)) || !get_param_client->service_is_ready()) {
+        RCLCPP_ERROR(this->get_logger(), "Service /mavros/param/get not available");
+        return;
+    }
+
+    auto get_param = [&](const std::string& param_id) -> mavros_msgs::msg::ParamValue {
+        auto cmdrq = std::make_shared<mavros_msgs::srv::ParamGet::Request>();
+        cmdrq->param_id = param_id;
+
+        // 发送异步请求
+        auto result_future = get_param_client->async_send_request(cmdrq);
+
+        // 等待结果 (简单阻塞式写法，实际工程建议用回调或状态机)
+        if (rclcpp::spin_until_future_complete(this->get_node_base_interface(), result_future) == rclcpp::FutureReturnCode::SUCCESS) {
+            auto response = result_future.get();
+            if (response->success) {
+                // Ardupilot 参数主要分为 integer 和 real (float)
+                // 通常 param_value.integer 用于整数，param_value.real 用于浮点
+                if (response->value.integer != 0 || response->value.real == 0.0) { 
+                     RCLCPP_INFO(this->get_logger(), "Param %s (Int): %ld", param_id.c_str(), response->value.integer);
+                }
+                if (response->value.real != 0.0) {
+                     RCLCPP_INFO(this->get_logger(), "Param %s (Float): %f", param_id.c_str(), response->value.real);
+                }
+                return response->value;
+            } else {
+                RCLCPP_ERROR(this->get_logger(), "Failed to get param: %s", param_id.c_str());
+            }
+        } else {
+            RCLCPP_ERROR(this->get_logger(), "Service call failed");
+        }
+        return mavros_msgs::msg::ParamValue {};
+    };
+
+    motor_params.spin_k = get_param("MOT_THST_EXPO").real;
+    motor_params.volt_max = get_param("MOT_BAT_VOLT_MAX").real;
 
     status_timer_ = this->create_wall_timer(std::chrono::seconds(1), [&](){
         if (status_counter_++ >= 3)
@@ -525,7 +561,7 @@ void VehicleNode::atmPressureCallback(const sensor_msgs::msg::FluidPressure::Sha
 {
     std::lock_guard<std::mutex> lk(mtx_kp);
     baro = val->fluid_pressure;
-    // kp = (baro / 101325.0) * (273.15 / (273.15 + temp));
+    kp = baro / 101325.0;
 }
 
 void VehicleNode::tempCallback(const sensor_msgs::msg::Temperature::SharedPtr val)
