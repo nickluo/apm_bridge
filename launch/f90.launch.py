@@ -54,7 +54,7 @@ def generate_launch_description():
         name='apm_bridge',
         output='screen',
         parameters=[
-            os.path.join(apm_bridge_pkg_share, 'parameters', 'airsim_parameters.yaml'),
+            os.path.join(apm_bridge_pkg_share, 'parameters', 'fpv_f90_parameters.yaml'),
             {'gimbal_port': LaunchConfiguration('gimbal_port')},
         ],
         remappings=[
@@ -75,7 +75,7 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             'fcu_url',
-            default_value='tcp://127.0.0.1:5762',
+            default_value='/dev/ttyTHS1:921600',
             description='FCU connection URL.'
         ),
         DeclareLaunchArgument(
