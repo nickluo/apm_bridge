@@ -10,7 +10,7 @@
 apm_bridge:
   ros__parameters:
     gravity_const: 9.80665
-    mass: 2.0
+    mass: 4.0
 
     lipo_cells: 3
     voltage_compensation: false
@@ -18,10 +18,10 @@ apm_bridge:
     simulation: true
 
     motor_parameters:
-      A:  0.0000793607
-      B: -0.004194295
-      C:  0.104836283
-      D: -0.231665421
+      A:  0.0
+      B:  0.0
+      C:  0.046773878
+      D: -0.117647059
       n:  4
 
     init_position:
