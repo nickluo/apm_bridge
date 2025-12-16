@@ -38,9 +38,12 @@ namespace quadratic_thrust_model
 
     double thrustToForce(const MotorParams &motor_params, double thrust, double kp, double battery_voltage = -1.0)
     {
-        auto k_1 = motor_params.spin_k - 1.0;
-        auto throttle = (k_1 + std::sqrt(k_1 * k_1 + 4.0 * motor_params.spin_k * thrust / kp)) /
-                        (2.0 * motor_params.spin_k);
+        auto throttle = thrust / kp;
+        if (std::abs(motor_params.spin_k) > EPSILON) {
+            auto k_1 = motor_params.spin_k - 1.0;
+            throttle = (k_1 + std::sqrt(k_1 * k_1 + 4.0 * motor_params.spin_k * throttle)) /
+                            (2.0 * motor_params.spin_k);
+        }
         
         if (battery_voltage > 0)
             throttle *= battery_voltage / motor_params.volt_max;    // voltage compensation

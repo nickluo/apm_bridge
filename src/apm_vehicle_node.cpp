@@ -364,7 +364,7 @@ void VehicleNode::imuCallback(const sensor_msgs::msg::Imu::SharedPtr val)
         gravity_acc = ema.filter(acc, 2);
     }
     else if (current_state == mavros_msgs::msg::ExtendedState::LANDED_STATE_IN_AIR
-        && (hoverable == 1 || (hoverable==2 && in_hover))) // Update mass when hovering
+        && (hoverable == 1)) // || (hoverable==2 && in_hover))) // Update mass when hovering
     {
         tf2::Quaternion q;
         tf2::fromMsg(val->orientation, q);
@@ -495,8 +495,8 @@ void VehicleNode::ctrlCommandCallback(const quadrotor_msgs::msg::ControlCommand:
     }
     target->thrust = (thrust < 0.0) ? 0.0f : ((thrust > 1.0) ? 1.0f : (float)thrust);
 
-    // printf("target bodyrate: (%.2f, %.2f, %.2f) rad/s, force: %.2f, thrust: %.2f\n", 
-    //     target->body_rate.x, target->body_rate.y, target->body_rate.z, command->collective_thrust * mass, thrust);
+    // RCLCPP_WARN(this->get_logger(), "target bodyrate: (%.2f, %.2f, %.2f) rad/s, force: %.2f, thrust: %.2f\n", 
+    //    target->body_rate.x, target->body_rate.y, target->body_rate.z, command->collective_thrust * mass, thrust);
 
     target_pub->publish(std::move(target));
 }
