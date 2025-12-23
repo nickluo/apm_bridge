@@ -4,8 +4,6 @@
 using namespace apm_bridge;
 namespace mavlink_msg = mavlink::common::msg;
 
-#define CHANNEL_TRIGGER     6
-
 VehicleNode::VehicleNode()
     : Node("apm_vehicle_node"), ema(50)
 {
@@ -14,6 +12,7 @@ VehicleNode::VehicleNode()
     // this->declare_parameter<double>("control_frequency", 10.0);
     this->declare_parameter<bool>("simulation", false);
     this->declare_parameter<int>("lipo_cells", 6);
+    this->declare_parameter<int>("channel_trigger", 6);
     this->declare_parameter<bool>("voltage_compensation", false);
     this->declare_parameter<double>("motor_parameters.A", 0.0);
     this->declare_parameter<double>("motor_parameters.B", 0.0);
@@ -37,6 +36,7 @@ VehicleNode::VehicleNode()
     this->get_parameter("simulation", simulation);
     this->get_parameter("lipo_cells", n_lipo_cells);
     this->get_parameter("voltage_compensation", voltage_compensation);
+    this->get_parameter("channel_trigger", channel_trigger);
     this->get_parameter("motor_parameters.A", motor_params.A);
     this->get_parameter("motor_parameters.B", motor_params.B);
     this->get_parameter("motor_parameters.C", motor_params.C);
@@ -115,6 +115,20 @@ VehicleNode::VehicleNode()
             t.detach();
             waypoint_list_sub.reset();
     });
+
+    tracker_state_sub = this->create_subscription<std_msgs::msg::Int8>(
+        "/fpv/tracker_state", 1,
+        [&](const std_msgs::msg::Int8::SharedPtr msg) {
+            // RCLCPP_INFO(this->get_logger(), "Received tracker state: %d", msg->data);
+            in_tracking = (msg->data == 2); // TRACKING
+        });
+    
+    mission_state_sub_ = this->create_subscription<std_msgs::msg::Bool>(
+        "/fpv/mission_state", 1, 
+        [&](const std_msgs::msg::Bool::SharedPtr msg) {
+            in_mission = msg->data;
+            // RCLCPP_INFO(this->get_logger(), "Mission state received: %s", msg->data ? "running" : "stopped");
+        });
 
     // set_global_pos_pub = this->create_publisher<geographic_msgs::msg::GeoPointStamped>("/mavros/global_position/set_gp_origin", rclcpp::SensorDataQoS());
     // sync_timer_ = this->create_wall_timer(std::chrono::seconds(5), std::bind(&VehicleNode::syncWorkerCallback, this));
@@ -284,7 +298,7 @@ void VehicleNode::rcInCallback(const mavros_msgs::msg::RCIn::SharedPtr rc)
 
     if (!toggled)
     {
-        if (rc->channels[CHANNEL_TRIGGER] > 1900)
+        if (rc->channels[channel_trigger] > 1900)
         {
             auto current_time = this->now();
             if (last_triggered_time.nanoseconds() == 0)
@@ -295,11 +309,16 @@ void VehicleNode::rcInCallback(const mavros_msgs::msg::RCIn::SharedPtr rc)
             {
                 last_triggered_time = rclcpp::Time(0);
                 toggled = true;
-                RCLCPP_INFO(this->get_logger(), "RC Trigger toggle");
-                trigger_state = !trigger_state;
                 auto msg = std::make_unique<std_msgs::msg::Header>();
                 msg->stamp = this->now();
-                msg->frame_id = trigger_state ? "ON" : "OFF";
+                if (in_tracking && trigger_state && !in_mission) {
+                    msg->frame_id = "MISSION";
+                }
+                else {
+                    trigger_state = !trigger_state;
+                    msg->frame_id = trigger_state ? "ON" : "OFF";
+                }
+                RCLCPP_INFO(this->get_logger(), "Tracker Triggered : %s", msg->frame_id.c_str());
                 trigger_pub->publish(std::move(msg));
             }
         }
@@ -308,7 +327,7 @@ void VehicleNode::rcInCallback(const mavros_msgs::msg::RCIn::SharedPtr rc)
             last_triggered_time = rclcpp::Time(0);
         }
     }
-    else if (rc->channels[CHANNEL_TRIGGER] < 1100)
+    else if (rc->channels[channel_trigger] < 1100)
     {
         toggled = false;
     }

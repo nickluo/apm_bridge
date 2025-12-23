@@ -16,6 +16,8 @@ apm_bridge:
 
     simulation: true
 
+    channel_trigger: 6
+
     motor_parameters:
       A:  0.0000793607
       B: -0.004194295
