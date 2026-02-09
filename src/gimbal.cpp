@@ -101,11 +101,11 @@ void GimbalControl::run()
         float pitch_exp = 0.0f;
         float roll_exp = 0.0f;
 
-        std::chrono::high_resolution_clock::time_point last_time;
-        bool first_run = true;
-        float last_yaw_encoder = 0.0f;
-        float omega_yaw = 0.0f;
-        float delta = 0.01f;
+        // std::chrono::high_resolution_clock::time_point last_time;
+        // bool first_run = true;
+        // float last_yaw_encoder = 0.0f;
+        // float omega_yaw = 0.0f;
+        // float delta = 0.01f;
 
         start_stop(true);
         while (running.load())
@@ -116,15 +116,9 @@ void GimbalControl::run()
                 auto current_time = std::chrono::high_resolution_clock::now();
                 
                 roll_exp = -last_response.cam_angle[0]  * 0.01f * PITCH_ROLL_SPEED_SCALE;
-                if (roll_exp > MAX_ANGLE_SPEED)
-                    roll_exp = MAX_ANGLE_SPEED;
-                else if (roll_exp < -MAX_ANGLE_SPEED)
-                    roll_exp = -MAX_ANGLE_SPEED;
+                roll_exp = std::clamp(roll_exp, -MAX_ANGLE_SPEED, MAX_ANGLE_SPEED);
                 pitch_exp = -last_response.cam_angle[1] * 0.01f * PITCH_ROLL_SPEED_SCALE;
-                if (pitch_exp > MAX_ANGLE_SPEED)
-                    pitch_exp = MAX_ANGLE_SPEED;
-                else if (pitch_exp < -MAX_ANGLE_SPEED)
-                    pitch_exp = -MAX_ANGLE_SPEED;
+                pitch_exp = std::clamp(pitch_exp, -MAX_ANGLE_SPEED, MAX_ANGLE_SPEED);
 
                 float current_yaw_encoder = last_response.mtr_angle[2] * 0.01f;
 
@@ -154,17 +148,17 @@ void GimbalControl::run()
                 else if (scale > 1.0f)
                     scale = 1.0f;
 
-                if (first_run)
-                {
-                    first_run = false;
-                }
-                else
-                {
-                    delta = std::chrono::duration_cast<std::chrono::duration<float, std::chrono::seconds::period>>(current_time - last_time).count();
-                    omega_yaw = -(current_yaw_encoder - last_yaw_encoder) / delta; // deg/s
-                }
-                last_time = current_time;
-                last_yaw_encoder = current_yaw_encoder;
+                // if (first_run)
+                // {
+                //     first_run = false;
+                // }
+                // else
+                // {
+                //     delta = std::chrono::duration_cast<std::chrono::duration<float, std::chrono::seconds::period>>(current_time - last_time).count();
+                //     omega_yaw = -(current_yaw_encoder - last_yaw_encoder) / delta; // deg/s
+                // }
+                // last_time = current_time;
+                // last_yaw_encoder = current_yaw_encoder;
                 
                 if (max)
                 {
@@ -176,10 +170,8 @@ void GimbalControl::run()
                     yaw_exp = -current_yaw_encoder * YAW_SPEED_SCALE * scale;
                     if (std::abs(yaw_exp) < 0.1f)
                         yaw_exp = 0.0f;
-                    else if (yaw_exp > MAX_ANGLE_SPEED)
-                        yaw_exp = MAX_ANGLE_SPEED;
-                    else if (yaw_exp < -MAX_ANGLE_SPEED)
-                        yaw_exp = -MAX_ANGLE_SPEED;
+                    else
+                        yaw_exp = std::clamp(yaw_exp, -MAX_ANGLE_SPEED, MAX_ANGLE_SPEED);
                 }
 
                 // printf("Current Yaw rate: %.2f deg/s  Expected Yaw rate: %.2f deg/s\n", omega_yaw, yaw_exp);
@@ -192,9 +184,9 @@ void GimbalControl::run()
                     euler_angles_FLU[0] =   last_response.cam_angle[0] * 0.01f;
                     euler_angles_FLU[1] = - last_response.cam_angle[1] * 0.01f;
                     euler_angles_FLU[2] = - current_yaw_encoder;
-                    ema_filter.filter( last_response.cam_rate[0] * 0.1f, 0);
-                    ema_filter.filter(-last_response.cam_rate[1] * 0.1f, 1);
-                    ema_filter.filter(omega_yaw, 2);
+                    ema_filter.filter(-last_response.cam_rate[1] * 0.1f, 0);    // Roll rate
+                    ema_filter.filter( last_response.cam_rate[0] * 0.1f, 1);    // Pitch rate
+                    ema_filter.filter(-last_response.cam_rate[2] * 0.1f, 2);    // Yaw rate
                     // printf("Roll rate: %.2f Pitch rate: %.2f Yaw rate: %.2f deg/s\n", 
                     //     ema_filter[0], ema_filter[1], ema_filter[2]);
                 }
