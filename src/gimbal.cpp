@@ -184,7 +184,7 @@ void GimbalControl::run()
                     euler_angles_FLU[0] =   last_response.cam_angle[0] * 0.01f;
                     euler_angles_FLU[1] = - last_response.cam_angle[1] * 0.01f;
                     euler_angles_FLU[2] = - current_yaw_encoder;
-                    ema_filter.filter(-last_response.cam_rate[1] * 0.1f, 0);    // Roll rate
+                    ema_filter.filter( last_response.cam_rate[1] * 0.1f, 0);    // Roll rate
                     ema_filter.filter( last_response.cam_rate[0] * 0.1f, 1);    // Pitch rate
                     ema_filter.filter(-last_response.cam_rate[2] * 0.1f, 2);    // Yaw rate
                     // printf("Roll rate: %.2f Pitch rate: %.2f Yaw rate: %.2f deg/s\n", 
