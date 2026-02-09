@@ -9,7 +9,7 @@
 apm_bridge:
   ros__parameters:
     gravity_const: 9.801
-    mass: 2.05
+    mass: 2.0
 
     lipo_cells: 6
     voltage_compensation: true

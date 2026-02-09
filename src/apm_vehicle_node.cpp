@@ -233,6 +233,11 @@ void VehicleNode::paramEventCallback(const mavros_msgs::msg::ParamEvent::SharedP
         motor_params.volt_max = event->value.double_value;
         RCLCPP_INFO(this->get_logger(), "Updated motor volt_max to %.6f", motor_params.volt_max);
     }
+    else if (event->value.type == rcl_interfaces::msg::ParameterType::PARAMETER_DOUBLE && event->param_id == "MOT_THST_HOVER")
+    {
+        double h = event->value.double_value;
+        RCLCPP_INFO(this->get_logger(), "MOT_THST_HOVER %.6f", h);
+    }
 }
 
 // void VehicleNode::syncWorkerCallback()
