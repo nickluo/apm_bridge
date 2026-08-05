@@ -76,7 +76,7 @@ namespace apm_bridge
         rclcpp::Subscription<mavros_msgs::msg::ParamEvent>::SharedPtr param_event_sub;
 
         rclcpp::Subscription<std_msgs::msg::Int8>::SharedPtr tracker_state_sub;
-        rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr mission_state_sub_;
+        rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr mission_state_sub;
         rclcpp::Subscription<mavros_msgs::msg::WaypointList>::SharedPtr waypoint_list_sub;
         rclcpp::Publisher<geographic_msgs::msg::GeoPointStamped>::SharedPtr set_global_pos_pub;
         rclcpp::Publisher<sensor_msgs::msg::Imu>::SharedPtr gimbal_imu_pub;
@@ -134,8 +134,8 @@ namespace apm_bridge
         void rcInCallback(const mavros_msgs::msg::RCIn::SharedPtr rc);
         void paramEventCallback(const mavros_msgs::msg::ParamEvent::SharedPtr event);
 
-        rclcpp::TimerBase::SharedPtr gimbal_timer_;
-        rclcpp::TimerBase::SharedPtr status_timer_;
+        rclcpp::TimerBase::SharedPtr gimbal_timer;
+        rclcpp::TimerBase::SharedPtr status_timer;
         int status_counter_ = 0;
         // rclcpp::TimerBase::SharedPtr sync_timer_;
         // void syncWorkerCallback();

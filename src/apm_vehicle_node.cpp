@@ -106,11 +106,11 @@ VehicleNode::VehicleNode()
     
     status_pub = this->create_publisher<mavros_msgs::msg::StatusText>("/mavros/statustext/send", 10);
     trigger_pub = this->create_publisher<std_msgs::msg::Header>("/fpv/tracker_trigger", 10);
-
+    
     waypoint_list_sub = this->create_subscription<mavros_msgs::msg::WaypointList>("/mavros/mission/waypoints", 10, 
         [&](const mavros_msgs::msg::WaypointList::SharedPtr msg) {
             RCLCPP_INFO(this->get_logger(), "Received WaypointList with %zu waypoints", msg->waypoints.size());
-            // sync_timer_ = this->create_wall_timer(std::chrono::seconds(1), std::bind(&VehicleNode::syncWorkerCallback, this));
+            // sync_timer = this->create_wall_timer(std::chrono::seconds(1), std::bind(&VehicleNode::syncWorkerCallback, this));
             auto t = std::thread(&VehicleNode::setupMavlink, this);
             t.detach();
             waypoint_list_sub.reset();
@@ -123,7 +123,7 @@ VehicleNode::VehicleNode()
             in_tracking = (msg->data == 2); // TRACKING
         });
     
-    mission_state_sub_ = this->create_subscription<std_msgs::msg::Bool>(
+    mission_state_sub = this->create_subscription<std_msgs::msg::Bool>(
         "/fpv/mission_state", 1, 
         [&](const std_msgs::msg::Bool::SharedPtr msg) {
             in_mission = msg->data;
@@ -131,10 +131,10 @@ VehicleNode::VehicleNode()
         });
 
     // set_global_pos_pub = this->create_publisher<geographic_msgs::msg::GeoPointStamped>("/mavros/global_position/set_gp_origin", rclcpp::SensorDataQoS());
-    // sync_timer_ = this->create_wall_timer(std::chrono::seconds(5), std::bind(&VehicleNode::syncWorkerCallback, this));
+    // sync_timer = this->create_wall_timer(std::chrono::seconds(5), std::bind(&VehicleNode::syncWorkerCallback, this));
 
     gimbal_imu_pub = this->create_publisher<sensor_msgs::msg::Imu>("/fpv/gimbal", 10);
-    gimbal_timer_ = this->create_wall_timer(std::chrono::milliseconds(10), [&](){
+    gimbal_timer = this->create_wall_timer(std::chrono::milliseconds(10), [&](){
         if (gimbal->is_running()) {
             auto imu_msg = gimbal->getOrientationFLU();
             if (imu_msg) {
@@ -160,12 +160,12 @@ VehicleNode::VehicleNode()
 
 VehicleNode::~VehicleNode() 
 {
-    // sync_timer_->cancel();
+    // sync_timer->cancel();
 }
 
 void VehicleNode::setupMavlink()
 {
-    // RCLCPP_WARN(this->get_logger(), "VehicleNode::setupMavlink()");
+    RCLCPP_WARN(this->get_logger(), "VehicleNode::setupMavlink()");
     auto set_message_interval = this->create_client<mavros_msgs::srv::CommandLong>("/mavros/cmd/command");
     if (!set_message_interval->wait_for_service(std::chrono::seconds(10)) || !set_message_interval->service_is_ready()) {
         RCLCPP_ERROR(this->get_logger(), "Service /mavros/cmd/command not available");
@@ -208,10 +208,10 @@ void VehicleNode::setupMavlink()
         // send_request(mavlink_msg::LOCAL_POSITION_NED_COV::MSG_ID, (float)control_frequency);
     }
 
-    status_timer_ = this->create_wall_timer(std::chrono::seconds(1), [&](){
+    status_timer = this->create_wall_timer(std::chrono::seconds(1), [&](){
         if (status_counter_++ >= 3)
         {
-            status_timer_->cancel();
+            status_timer->cancel();
             return;
         }
         auto msg = std::make_unique<mavros_msgs::msg::StatusText>();
@@ -263,7 +263,7 @@ void VehicleNode::paramEventCallback(const mavros_msgs::msg::ParamEvent::SharedP
 //             command_set_home->async_send_request(request);
 //             RCLCPP_WARN(this->get_logger(), "VehicleNode::syncWorkerCallback()");
 //         }
-//         sync_timer_->cancel(); // Stop the timer after successful execution
+//         sync_timer->cancel(); // Stop the timer after successful execution
 //     }
 // }
 
@@ -387,37 +387,37 @@ void VehicleNode::imuCallback(const sensor_msgs::msg::Imu::SharedPtr val)
                              val->linear_acceleration.z * val->linear_acceleration.z);
         gravity_acc = ema.filter(acc, 2);
     }
-    else if (current_state == mavros_msgs::msg::ExtendedState::LANDED_STATE_IN_AIR
-        && (hoverable == 1)) // || (hoverable==2 && in_hover))) // Update mass when hovering
-    {
-        tf2::Quaternion q;
-        tf2::fromMsg(val->orientation, q);
-        tf2::Matrix3x3 mat(q);
-        double roll, pitch, yaw;
-        mat.getRPY(roll, pitch, yaw);
-        tf2::Vector3 acc;
-        acc.setY(val->linear_acceleration.y - std::sin(roll) * std::cos(pitch) * gravity_acc);
-        acc.setZ(val->linear_acceleration.z - std::cos(roll) * std::cos(pitch) * gravity_acc);
-        acc.setX(val->linear_acceleration.x + std::sin(pitch) * gravity_acc);
+    // else if (current_state == mavros_msgs::msg::ExtendedState::LANDED_STATE_IN_AIR
+    //     && (hoverable == 1)) // || (hoverable==2 && in_hover))) // Update mass when hovering
+    // {
+    //     tf2::Quaternion q;
+    //     tf2::fromMsg(val->orientation, q);
+    //     tf2::Matrix3x3 mat(q);
+    //     double roll, pitch, yaw;
+    //     mat.getRPY(roll, pitch, yaw);
+    //     tf2::Vector3 acc;
+    //     acc.setY(val->linear_acceleration.y - std::sin(roll) * std::cos(pitch) * gravity_acc);
+    //     acc.setZ(val->linear_acceleration.z - std::cos(roll) * std::cos(pitch) * gravity_acc);
+    //     acc.setX(val->linear_acceleration.x + std::sin(pitch) * gravity_acc);
 
-        // printf("roll: %.2f, pitch: %.2f, yaw: %.2f, acc: (%.2f, %.2f, %.2f) m/s^2\n", 
-        //     roll, pitch, yaw, val->linear_acceleration.x, val->linear_acceleration.y, val->linear_acceleration.z);
-        // printf("Estimated mass: %.2f kg, g: %.2f m/s^2, acc^2: %.2f\n", 
-        //         collective_force / gravity, gravity_acc, acc.length2());
+    //     // printf("roll: %.2f, pitch: %.2f, yaw: %.2f, acc: (%.2f, %.2f, %.2f) m/s^2\n", 
+    //     //     roll, pitch, yaw, val->linear_acceleration.x, val->linear_acceleration.y, val->linear_acceleration.z);
+    //     // printf("Estimated mass: %.2f kg, g: %.2f m/s^2, acc^2: %.2f\n", 
+    //     //         collective_force / gravity, gravity_acc, acc.length2());
 
-        if (std::fabs(roll) < 0.05 && std::fabs(pitch) < 0.05 && ema.filter(acc.length2(), 4) < 0.01
-            && collective_force > mass*gravity*0.5) // if hovering
-        {
-            auto mass_t = ema.filter(collective_force / gravity, 3);
+    //     if (std::fabs(roll) < 0.05 && std::fabs(pitch) < 0.05 && ema.filter(acc.length2(), 4) < 0.01
+    //         && collective_force > mass*gravity*0.5) // if hovering
+    //     {
+    //         auto mass_t = ema.filter(collective_force / gravity, 3);
 
-            if (std::fabs(mass_t - mass) > 0.1)
-            {
-                std::lock_guard<std::mutex> lk(mtx_kp);
-                mass = mass_t;
-                RCLCPP_WARN(this->get_logger(), "Updated Mass = %f kg", mass);
-            }
-        }
-    }
+    //         if (std::fabs(mass_t - mass) > 0.1)
+    //         {
+    //             std::lock_guard<std::mutex> lk(mtx_kp);
+    //             mass = mass_t;
+    //             RCLCPP_WARN(this->get_logger(), "Updated Mass = %f kg", mass);
+    //         }
+    //     }
+    // }
 }
 
 void VehicleNode::ctrlCommandRawCallback(const quadrotor_msgs::msg::ControlCommand::SharedPtr command)
