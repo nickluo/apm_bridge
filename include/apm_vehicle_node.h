@@ -76,6 +76,7 @@ namespace apm_bridge
         rclcpp::Subscription<mavros_msgs::msg::ParamEvent>::SharedPtr param_event_sub;
 
         rclcpp::Subscription<std_msgs::msg::Int8>::SharedPtr tracker_state_sub;
+        rclcpp::Subscription<std_msgs::msg::Int8>::SharedPtr radar_state_sub;
         rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr mission_state_sub;
         rclcpp::Subscription<mavros_msgs::msg::WaypointList>::SharedPtr waypoint_list_sub;
         rclcpp::Publisher<geographic_msgs::msg::GeoPointStamped>::SharedPtr set_global_pos_pub;
@@ -106,6 +107,7 @@ namespace apm_bridge
 
         std::atomic_bool armed = false;
         std::atomic_bool in_tracking = false;
+        std::atomic_bool radar_tracking = false;
         std::atomic_bool in_mission = false;
         std::atomic_uint8_t landed_state;
         bool use_rate = false;

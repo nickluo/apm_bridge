@@ -122,6 +122,15 @@ VehicleNode::VehicleNode()
             // RCLCPP_INFO(this->get_logger(), "Received tracker state: %d", msg->data);
             in_tracking = (msg->data == 2); // TRACKING
         });
+
+    // Radar relay track status, same encoding as /fpv/tracker_state. A radar lock alone is enough
+    // to arm MISSION: the interceptor flies the mid-course leg on the relay and hands over to
+    // vision once the target is in frame.
+    radar_state_sub = this->create_subscription<std_msgs::msg::Int8>(
+        "/fpv/radar_state", 1,
+        [&](const std_msgs::msg::Int8::SharedPtr msg) {
+            radar_tracking = (msg->data == 2); // TRACKING
+        });
     
     mission_state_sub = this->create_subscription<std_msgs::msg::Bool>(
         "/fpv/mission_state", 1, 
@@ -316,14 +325,15 @@ void VehicleNode::rcInCallback(const mavros_msgs::msg::RCIn::SharedPtr rc)
                 toggled = true;
                 auto msg = std::make_unique<std_msgs::msg::Header>();
                 msg->stamp = this->now();
-                if (in_tracking && trigger_state && !in_mission) {
+                if ((in_tracking || radar_tracking) && trigger_state && !in_mission) {
                     msg->frame_id = "MISSION";
                 }
                 else {
                     trigger_state = !trigger_state;
                     msg->frame_id = trigger_state ? "ON" : "OFF";
                 }
-                RCLCPP_INFO(this->get_logger(), "Tracker Triggered : %s", msg->frame_id.c_str());
+                RCLCPP_INFO(this->get_logger(), "Tracker Triggered : %s (vision=%d radar=%d)",
+                    msg->frame_id.c_str(), in_tracking.load(), radar_tracking.load());
                 trigger_pub->publish(std::move(msg));
             }
         }
