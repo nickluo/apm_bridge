@@ -1,0 +1,46 @@
+custom_link_bridge:
+  ros__parameters:
+    gravity_const: 9.801
+    mass: 2.0
+
+    lipo_cells: 6
+    voltage_compensation: true
+    baro_compensation: true
+
+    channel_trigger: 6
+
+    motor_parameters:
+      A:  0.0000793607
+      B: -0.004194295
+      C:  0.104836283
+      D: -0.231665421
+      n:  4
+      spin_k: 0.0
+
+    link:
+      # serial: 真机串口; tcp: SITL 仿真 (UART3 = tcp/5763)
+      transport: "serial"
+      serial_port: "/dev/ttyTHS1"
+      baudrate: 921600
+      tcp_host: "127.0.0.1"
+      tcp_port: 5763
+      control_rate: 100.0   # 0x20 上行频率，须 < FC 看门狗 (默认 50ms) 容忍的丢帧
+      sync_rate: 1.0        # 四时间戳对时频率
+      diag_rate: 0.2        # 链路诊断日志频率
+
+    imu:
+      # 0x10 原生航空制单位 (gyro 0.1 deg/s, acc 1mg)，无需标定缩放。
+      frame_id: "base_link"
+      # REP-145 协方差参数，留 0 表示“未知”。
+      orientation_stddev: 0.0
+      angular_velocity_stddev: 0.0
+      linear_acceleration_stddev: 0.0
+
+    rc:
+      control_timeout: 0.5
+
+    landed:
+      airborne_altitude: 0.5
+
+    # 留空则不启用云台线程。
+    gimbal_port: ""

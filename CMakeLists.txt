@@ -54,8 +54,31 @@ ament_target_dependencies(apm_bridge_node
 
 target_link_libraries(apm_bridge_node xfgimbal)
 
+# Betaflight custom-link bridge: same ROS interface as apm_bridge_node, but
+# talks the firmware's dedicated binary link (USE_CUSTOM_LINK) over a serial
+# port or TCP (SITL) instead of MAVLink through MAVROS.
+add_executable(custom_link_bridge_node
+  src/custom_link_vehicle_node.cpp
+  src/custom_link/client.cpp
+  src/custom_link/transport.cpp
+)
+ament_target_dependencies(custom_link_bridge_node
+  rclcpp
+  std_msgs
+  geometry_msgs
+  tf2_geometry_msgs
+  sensor_msgs
+  nav_msgs
+  tf2_ros
+  quadrotor_msgs
+  mavros_msgs
+)
+
+target_link_libraries(custom_link_bridge_node xfgimbal)
+
 install(TARGETS
   apm_bridge_node
+  custom_link_bridge_node
   DESTINATION lib/${PROJECT_NAME}
 )
 
