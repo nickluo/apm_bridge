@@ -25,6 +25,7 @@ custom_link_bridge:
       tcp_host: "127.0.0.1"
       tcp_port: 5763
       control_rate: 100.0   # 0x20 上行频率，须 < FC 看门狗 (默认 50ms) 容忍的丢帧
+      rate_limit_dps: 0.0   # 客户端角速度限幅 (deg/s, 0=不限)；固件侧另有 custom_link_rate_limit_dps
       sync_rate: 1.0        # 四时间戳对时频率
       diag_rate: 0.2        # 链路诊断日志频率
 

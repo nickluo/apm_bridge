@@ -57,6 +57,7 @@ CustomLinkVehicleNode::CustomLinkVehicleNode()
     this->declare_parameter<double>("link.control_rate", 100.0);
     this->declare_parameter<double>("link.sync_rate", 1.0);
     this->declare_parameter<double>("link.diag_rate", 0.2);
+    this->declare_parameter<double>("link.rate_limit_dps", 0.0);
 
     this->declare_parameter<std::string>("imu.frame_id", "base_link");
     this->declare_parameter<double>("imu.orientation_stddev", 0.0);
@@ -180,6 +181,7 @@ CustomLinkVehicleNode::CustomLinkVehicleNode()
     this->get_parameter("link.control_rate", control_rate);
     this->get_parameter("link.sync_rate", sync_rate);
     this->get_parameter("link.diag_rate", diag_rate);
+    this->get_parameter("link.rate_limit_dps", rate_limit_dps);
 
     std::unique_ptr<custom_link::Transport> transport;
     if (transport_kind == "tcp")
@@ -491,6 +493,15 @@ void CustomLinkVehicleNode::pushControl()
             {
                 cmd_valid = false; // 只作废控制量，arm 请求独立保留
             }
+        }
+    }
+    // 发送前角速度限幅（deg/s，0 = 不限制）。独立于固件侧
+    // custom_link_rate_limit_dps，作为客户端防御层；生效值取两者中更小。
+    if (fresh && rate_limit_dps > 0.0)
+    {
+        for (int i = 0; i < 3; i++)
+        {
+            input.rate_dps[i] = std::clamp(input.rate_dps[i], -rate_limit_dps, rate_limit_dps);
         }
     }
     client->setControl(input, fresh);

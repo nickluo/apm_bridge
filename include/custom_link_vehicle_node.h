@@ -104,6 +104,7 @@ namespace custom_link_bridge
 
         double control_timeout = 0.5;
         double airborne_altitude = 0.5;
+        double rate_limit_dps = 0.0;      // 发送前角速度限幅, 0 = 不限制
 
         std::unique_ptr<custom_link::Client> client;
 
