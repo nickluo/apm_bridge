@@ -9,3 +9,4 @@ build.sh
 build/
 src/test
 src/test.cpp
+**/__pycache__/

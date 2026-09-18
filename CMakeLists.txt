@@ -92,4 +92,10 @@ install(DIRECTORY
   DESTINATION share/${PROJECT_NAME}/
 )
 
+# 台架标定工具 (kestrel_utils 移植): thrust_test_node + scale_reader_node
+install(PROGRAMS scripts/thrust_test_node.py
+  DESTINATION lib/${PROJECT_NAME} RENAME thrust_test_node)
+install(PROGRAMS scripts/scale_reader_node.py
+  DESTINATION lib/${PROJECT_NAME} RENAME scale_reader_node)
+
 ament_package()

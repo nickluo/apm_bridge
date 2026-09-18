@@ -20,6 +20,12 @@
   <depend>quadrotor_msgs</depend>
   <depend>mavros_msgs</depend>
 
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>python3-serial</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
+  <!-- 台架标定工具绘图为可选能力 (缺失时自动降级为仅存 PNG/CSV) -->
+  <exec_depend>python3-matplotlib</exec_depend>
+
   <export>
     <build_type>ament_cmake</build_type>
   </export>
