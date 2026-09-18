@@ -11,7 +11,9 @@
 #include <mavros_msgs/msg/rc_in.hpp>
 #include <mavros_msgs/msg/state.hpp>
 #include <sensor_msgs/msg/battery_state.hpp>
+#include <sensor_msgs/msg/fluid_pressure.hpp>
 #include <sensor_msgs/msg/imu.hpp>
+#include <sensor_msgs/msg/temperature.hpp>
 
 #include <tf2/LinearMath/Quaternion.h>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
@@ -58,6 +60,8 @@ namespace custom_link_bridge
         rclcpp::Publisher<mavros_msgs::msg::State>::SharedPtr state_pub;
         rclcpp::Publisher<mavros_msgs::msg::ExtendedState>::SharedPtr ext_state_pub;
         rclcpp::Publisher<sensor_msgs::msg::BatteryState>::SharedPtr battery_pub;
+        rclcpp::Publisher<sensor_msgs::msg::FluidPressure>::SharedPtr pressure_pub;
+        rclcpp::Publisher<sensor_msgs::msg::Temperature>::SharedPtr temperature_pub;
         rclcpp::Publisher<quadrotor_msgs::msg::LowLevelFeedback>::SharedPtr ap_feedback_pub;
         rclcpp::Publisher<sensor_msgs::msg::Imu>::SharedPtr gimbal_imu_pub;
         rclcpp::Publisher<std_msgs::msg::Header>::SharedPtr trigger_pub;

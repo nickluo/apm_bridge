@@ -114,6 +114,11 @@ CustomLinkVehicleNode::CustomLinkVehicleNode()
     state_pub = this->create_publisher<mavros_msgs::msg::State>("/mavros/state", 10);
     ext_state_pub = this->create_publisher<mavros_msgs::msg::ExtendedState>("/mavros/extended_state", 10);
     battery_pub = this->create_publisher<sensor_msgs::msg::BatteryState>("/mavros/battery", 10);
+    // 环境气压/温度 (0x11 携带)：对外统一 /fpv 话题，供推力标定等工具采集 kp
+    pressure_pub = this->create_publisher<sensor_msgs::msg::FluidPressure>(
+        "/fpv/static_pressure", rclcpp::QoS(rclcpp::KeepLast(10)).best_effort());
+    temperature_pub = this->create_publisher<sensor_msgs::msg::Temperature>(
+        "/fpv/temperature_baro", rclcpp::QoS(rclcpp::KeepLast(10)).best_effort());
     ap_feedback_pub = this->create_publisher<quadrotor_msgs::msg::LowLevelFeedback>("~/low_level_feedback", 10);
     gimbal_imu_pub = this->create_publisher<sensor_msgs::msg::Imu>("/fpv/gimbal", 10);
     trigger_pub = this->create_publisher<std_msgs::msg::Header>("/fpv/tracker_trigger", 10);
@@ -367,6 +372,19 @@ void CustomLinkVehicleNode::handleMedium(const custom_link::protocol::PayloadMed
         std::lock_guard<std::mutex> lk(mtx_kp);
         kp = isaPressureRatio(alt);
     }
+
+    const rclcpp::Time stamp(static_cast<int64_t>(hostUs) * 1000, RCL_ROS_TIME);
+    sensor_msgs::msg::FluidPressure pressure;
+    pressure.header.stamp = stamp;
+    pressure.fluid_pressure = static_cast<double>(p.baro_pa);
+    pressure.variance = 0.0;
+    pressure_pub->publish(std::move(pressure));
+
+    sensor_msgs::msg::Temperature temperature;
+    temperature.header.stamp = stamp;
+    temperature.temperature = p.temp_cdeg * 0.01; // 0.01 degC -> degC
+    temperature.variance = 0.0;
+    temperature_pub->publish(std::move(temperature));
 }
 
 void CustomLinkVehicleNode::handleSlow(const custom_link::protocol::PayloadSlow &p, int64_t hostUs)

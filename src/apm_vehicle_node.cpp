@@ -101,6 +101,11 @@ VehicleNode::VehicleNode()
 
     target_pub = this->create_publisher<mavros_msgs::msg::AttitudeTarget>("/mavros/setpoint_raw/attitude", 10);
     ap_feedback_pub = this->create_publisher<quadrotor_msgs::msg::LowLevelFeedback>("~/low_level_feedback", 10);
+    // 环境气压/温度转发到统一 /fpv 话题，供推力标定等工具采集 kp (与 custom_link 桥一致)
+    fpv_pressure_pub = this->create_publisher<sensor_msgs::msg::FluidPressure>(
+        "/fpv/static_pressure", rclcpp::QoS(rclcpp::KeepLast(10)).best_effort());
+    fpv_temperature_pub = this->create_publisher<sensor_msgs::msg::Temperature>(
+        "/fpv/temperature_baro", rclcpp::QoS(rclcpp::KeepLast(10)).best_effort());
 
     command_arming = this->create_client<mavros_msgs::srv::CommandBool>("/mavros/cmd/arming");
     
@@ -361,12 +366,20 @@ void VehicleNode::attiTargetCallback(const mavros_msgs::msg::AttitudeTarget::Sha
     }
 }
 
-void VehicleNode::armCallback(const std_msgs::msg::Bool::SharedPtr msg) 
+void VehicleNode::armCallback(const std_msgs::msg::Bool::SharedPtr msg)
 {
     auto request = std::make_shared<mavros_msgs::srv::CommandBool::Request>();
     request->value = msg->data;
-    // command_arming->async_send_request(request);
-    executeService<mavros_msgs::srv::CommandBool>(command_arming, request);
+    // 异步发送: executeService 在回调内嵌套 spin_until_future_complete，节点
+    // 已被 rclcpp::spin 持有时会失败 (Node already added to an executor)。
+    command_arming->async_send_request(request,
+        [this](rclcpp::Client<mavros_msgs::srv::CommandBool>::SharedFuture future) {
+            if (!future.valid() || !future.get()->success) {
+                RCLCPP_ERROR(this->get_logger(), "Arming service call failed");
+                return;
+            }
+            RCLCPP_INFO(this->get_logger(), "Arming service call succeeded");
+        });
 }
 
 void VehicleNode::imuCallback(const sensor_msgs::msg::Imu::SharedPtr val)
@@ -537,16 +550,22 @@ void VehicleNode::ctrlCommandCallback(const quadrotor_msgs::msg::ControlCommand:
 
 void VehicleNode::atmPressureCallback(const sensor_msgs::msg::FluidPressure::SharedPtr val)
 {
-    std::lock_guard<std::mutex> lk(mtx_kp);
-    baro = val->fluid_pressure;
-    kp = baro / 101325.0;
+    {
+        std::lock_guard<std::mutex> lk(mtx_kp);
+        baro = val->fluid_pressure;
+        kp = baro / 101325.0;
+    }
+    fpv_pressure_pub->publish(*val);
 }
 
 void VehicleNode::tempCallback(const sensor_msgs::msg::Temperature::SharedPtr val)
 {
-    std::lock_guard<std::mutex> lk(mtx_kp);
-    temp = val->temperature - 20.0;
-    // kp = (baro / 101325.0) * (273.15 / (273.15 + temp));
+    {
+        std::lock_guard<std::mutex> lk(mtx_kp);
+        temp = val->temperature - 20.0;
+        // kp = (baro / 101325.0) * (273.15 / (273.15 + temp));
+    }
+    fpv_temperature_pub->publish(*val);
 }
 
 void VehicleNode::batteryCallback(const sensor_msgs::msg::BatteryState::SharedPtr state)

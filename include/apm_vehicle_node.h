@@ -61,6 +61,8 @@ namespace apm_bridge
 
         rclcpp::Publisher<mavros_msgs::msg::AttitudeTarget>::SharedPtr target_pub;
         rclcpp::Publisher<quadrotor_msgs::msg::LowLevelFeedback>::SharedPtr ap_feedback_pub;
+        rclcpp::Publisher<sensor_msgs::msg::FluidPressure>::SharedPtr fpv_pressure_pub;
+        rclcpp::Publisher<sensor_msgs::msg::Temperature>::SharedPtr fpv_temperature_pub;
 
         rclcpp::Subscription<quadrotor_msgs::msg::ControlCommand>::SharedPtr control_command_sub;
         rclcpp::Subscription<quadrotor_msgs::msg::ControlCommand>::SharedPtr control_command_raw_sub;
