@@ -16,6 +16,7 @@ find_package(std_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
+find_package(tf2 REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
 find_package(quadrotor_msgs REQUIRED)
@@ -31,25 +32,34 @@ add_library(xfgimbal STATIC
   src/serial/unix.cc
   src/serial/list_ports_linux.cc
 )
-ament_target_dependencies(xfgimbal
-  rclcpp
-  tf2_ros
-  sensor_msgs
+
+target_link_libraries(xfgimbal
+  rclcpp::rclcpp
+  tf2::tf2
+  tf2_ros::tf2_ros
+  sensor_msgs::sensor_msgs
 )
 
 add_executable(apm_bridge_node src/apm_vehicle_node.cpp)
-ament_target_dependencies(apm_bridge_node
-  rclcpp
-  std_msgs
-  geometry_msgs
-  tf2_geometry_msgs
-  sensor_msgs
-  nav_msgs
-  tf2_ros
-  quadrotor_msgs
-  mavros_msgs
-  mavros
-  mavlink
+
+# mavros exports old-style variables, mavlink is header-only (include dirs)
+target_link_libraries(apm_bridge_node
+  rclcpp::rclcpp
+  std_msgs::std_msgs
+  geometry_msgs::geometry_msgs
+  tf2_geometry_msgs::tf2_geometry_msgs
+  sensor_msgs::sensor_msgs
+  nav_msgs::nav_msgs
+  tf2::tf2
+  tf2_ros::tf2_ros
+  quadrotor_msgs::quadrotor_msgs
+  mavros_msgs::mavros_msgs
+  ${mavros_LIBRARIES}
+)
+
+target_include_directories(apm_bridge_node SYSTEM PRIVATE
+  ${mavros_INCLUDE_DIRS}
+  ${mavlink_INCLUDE_DIRS}
 )
 
 target_link_libraries(apm_bridge_node xfgimbal)
@@ -62,16 +72,18 @@ add_executable(custom_link_bridge_node
   src/custom_link/client.cpp
   src/custom_link/transport.cpp
 )
-ament_target_dependencies(custom_link_bridge_node
-  rclcpp
-  std_msgs
-  geometry_msgs
-  tf2_geometry_msgs
-  sensor_msgs
-  nav_msgs
-  tf2_ros
-  quadrotor_msgs
-  mavros_msgs
+
+target_link_libraries(custom_link_bridge_node
+  rclcpp::rclcpp
+  std_msgs::std_msgs
+  geometry_msgs::geometry_msgs
+  tf2_geometry_msgs::tf2_geometry_msgs
+  sensor_msgs::sensor_msgs
+  nav_msgs::nav_msgs
+  tf2::tf2
+  tf2_ros::tf2_ros
+  quadrotor_msgs::quadrotor_msgs
+  mavros_msgs::mavros_msgs
 )
 
 target_link_libraries(custom_link_bridge_node xfgimbal)

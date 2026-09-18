@@ -7,7 +7,7 @@
 #include <atomic>
 #include <chrono>
 
-#include <tf2/LinearMath/Quaternion.h>
+#include <tf2/LinearMath/Quaternion.hpp>
 #include <sensor_msgs/msg/imu.hpp>
 
 #include "serial/serial.h"
