@@ -97,13 +97,42 @@ CustomLinkVehicleNode::CustomLinkVehicleNode()
                 motor_params.A, motor_params.B, motor_params.C, motor_params.D,
                 motor_params.n_motors, motor_params.volt_max, motor_params.spin_k);
 
-    // ---------------- 云台 (可选) ----------------
+    // ---------------- 云台 (可选, 支持 C-20S/C-40D/C-200T) ----------------
     std::string gimbal_port;
     this->get_parameter("gimbal_port", gimbal_port);
     if (!gimbal_port.empty())
     {
-        gimbal = std::make_unique<xfrobot::GimbalControl>(gimbal_port);
+        xfrobot::GimbalConfig gimbal_cfg = xfrobot::GimbalConfig::fromParameters(*this);
+        gimbal_uav_fusion = gimbal_cfg.send_uav_data;
+        gimbal = std::make_unique<xfrobot::GimbalControl>(gimbal_port, gimbal_cfg);
+        gimbal->setStatusCallback([this](const xfrobot::GimbalStatus &s) {
+            if (s.hw_err != 0)
+                RCLCPP_ERROR_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
+                                      "Gimbal hardware error: 0x%02X (需返厂检修)", s.hw_err);
+            if (s.gbc_stat != gimbal_last_stat)
+            {
+                gimbal_last_stat = s.gbc_stat;
+                static const char *kStatNames[] = {"UNDEFINED", "INIT", "STOPPED",
+                                                   "PROTECTION", "MANUAL", "POINT_SHIFT"};
+                if (s.gbc_stat == 3) // 倾角保护: 云台回中且不可控
+                    RCLCPP_ERROR(this->get_logger(),
+                                 "Gimbal entered PROTECTION state (倾角保护触发, 云台不可控)");
+                else
+                    RCLCPP_INFO(this->get_logger(), "Gimbal state -> %s",
+                                kStatNames[s.gbc_stat < 6 ? s.gbc_stat : 0]);
+            }
+            if (s.tca_ready != gimbal_last_tca)
+            {
+                gimbal_last_tca = s.tca_ready;
+                if (s.tca_ready)
+                    RCLCPP_INFO(this->get_logger(), "Gimbal temperature control ready (可校准陀螺仪)");
+            }
+        });
         gimbal->run();
+        RCLCPP_INFO(this->get_logger(), "Gimbal enabled on %s (model index %d, axes R/P/Y: %d/%d/%d, uav_fusion: %s)",
+                    gimbal_port.c_str(), static_cast<int>(gimbal_cfg.model),
+                    gimbal_cfg.roll.present ? 1 : 0, gimbal_cfg.pitch.present ? 1 : 0,
+                    gimbal_cfg.yaw.present ? 1 : 0, gimbal_uav_fusion ? "on" : "off");
     }
 
     // ---------------- ROS 接口 ----------------
@@ -305,6 +334,33 @@ void CustomLinkVehicleNode::handleFast(const custom_link::protocol::PayloadFast 
         att_valid = true;
     }
     current_heading.store(yaw_enu);
+
+    // 云台载机惯导数据融合 (协议 V1.0.4, 默认关闭)。
+    // 姿态角符号 (据协议附录1/2推导): 云台载机系为 FRD, 其"滚转右滚为正、
+    // 俯仰抬头为正、偏航顺时针为正"; 而 BF 实测姿态为 roll 左滚为正、
+    // pitch 抬头为负、yaw 逆时针为正 → 三轴均取反。
+    // 偏航为 BF 磁北/上电航向, 与云台世界系零位存在未验证的偏移。
+    // 加速度: 机体系(含重力)去重力后旋转到 NEU (协议要求大地系, 0.01m/s2)。
+    if (gimbal && gimbal_uav_fusion)
+    {
+        const int16_t angle_cdeg[3] = {
+            static_cast<int16_t>(-p.attitude[0]),
+            static_cast<int16_t>(-p.attitude[1]),
+            static_cast<int16_t>(-p.attitude[2])};
+
+        tf2::Quaternion q_att;
+        q_att.setRPY(roll_flu, pitch_flu, yaw_enu);
+        const tf2::Vector3 a_flu(accel_flu[0], accel_flu[1], accel_flu[2]);
+        const tf2::Vector3 a_enu = tf2::quatRotate(q_att, a_flu) + tf2::Vector3(0.0, 0.0, -gravity);
+        const auto to_cms2 = [](double v) {
+            return static_cast<int16_t>(std::clamp(v * 100.0, -32767.0, 32767.0));
+        };
+        const int16_t accel_cms2[3] = {
+            to_cms2(a_enu.y()), // 北
+            to_cms2(a_enu.x()), // 东
+            to_cms2(a_enu.z())};// 天
+        gimbal->setUavData(true, angle_cdeg, accel_cms2);
+    }
 
     publishImu(hostUs);
 }

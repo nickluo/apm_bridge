@@ -27,7 +27,32 @@ VehicleNode::VehicleNode()
     std::string gimbal_port;
     this->get_parameter("gimbal_port", gimbal_port);
     // std::cout << "========================================== Gimbal port: " << gimbal_port << std::endl;
-    gimbal = std::make_unique<xfrobot::GimbalControl>(gimbal_port);
+    // 云台支持 C-20S/C-40D/C-200T, 机型与限位经参数配置 (默认 C-200T 三轴)
+    xfrobot::GimbalConfig gimbal_cfg = xfrobot::GimbalConfig::fromParameters(*this);
+    gimbal = std::make_unique<xfrobot::GimbalControl>(gimbal_port, gimbal_cfg);
+    gimbal->setStatusCallback([this](const xfrobot::GimbalStatus &s) {
+        if (s.hw_err != 0)
+            RCLCPP_ERROR_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
+                                  "Gimbal hardware error: 0x%02X (需返厂检修)", s.hw_err);
+        if (s.gbc_stat != gimbal_last_stat)
+        {
+            gimbal_last_stat = s.gbc_stat;
+            static const char *kStatNames[] = {"UNDEFINED", "INIT", "STOPPED",
+                                               "PROTECTION", "MANUAL", "POINT_SHIFT"};
+            if (s.gbc_stat == 3) // 倾角保护: 云台回中且不可控
+                RCLCPP_ERROR(this->get_logger(),
+                             "Gimbal entered PROTECTION state (倾角保护触发, 云台不可控)");
+            else
+                RCLCPP_INFO(this->get_logger(), "Gimbal state -> %s",
+                            kStatNames[s.gbc_stat < 6 ? s.gbc_stat : 0]);
+        }
+        if (s.tca_ready != gimbal_last_tca)
+        {
+            gimbal_last_tca = s.tca_ready;
+            if (s.tca_ready)
+                RCLCPP_INFO(this->get_logger(), "Gimbal temperature control ready (可校准陀螺仪)");
+        }
+    });
     gimbal->run();
 
     this->get_parameter("gravity_const", gravity);

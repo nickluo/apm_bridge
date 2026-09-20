@@ -38,6 +38,7 @@ def generate_launch_description():
                 'link.tcp_port': LaunchConfiguration('tcp_port'),
             },
             {'gimbal_port': LaunchConfiguration('gimbal_port')},
+            {'gimbal_model': LaunchConfiguration('gimbal_model')},
         ],
         remappings=[
             ('~/low_level_feedback', '/fpv/low_level_feedback'),
@@ -75,6 +76,11 @@ def generate_launch_description():
             'gimbal_port',
             default_value='',
             description='Gimbal serial port. Empty disables the gimbal thread.'
+        ),
+        DeclareLaunchArgument(
+            'gimbal_model',
+            default_value='C200T',
+            description="Gimbal model: 'C20S' (1-axis), 'C40D' (2-axis) or 'C200T' (3-axis)."
         ),
         custom_link_node,
     ])

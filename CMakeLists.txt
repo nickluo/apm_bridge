@@ -76,9 +76,19 @@ ament_target_dependencies(custom_link_bridge_node
 
 target_link_libraries(custom_link_bridge_node xfgimbal)
 
+# 云台协议自检 harness: 供 test/gimbal_pysim_test.py 在 pty 上做协议级仿真验证
+add_executable(gimbal_selftest test/gimbal_selftest.cpp)
+ament_target_dependencies(gimbal_selftest
+  rclcpp
+  tf2_ros
+  sensor_msgs
+)
+target_link_libraries(gimbal_selftest xfgimbal)
+
 install(TARGETS
   apm_bridge_node
   custom_link_bridge_node
+  gimbal_selftest
   DESTINATION lib/${PROJECT_NAME}
 )
 

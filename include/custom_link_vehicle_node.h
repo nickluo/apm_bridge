@@ -146,6 +146,11 @@ namespace custom_link_bridge
 
         apm_bridge::EMAFilter<double, 1> ema{50};
         std::unique_ptr<xfrobot::GimbalControl> gimbal;
+
+        // ---- 云台状态 (仅云台工作线程的回调中读写) ----
+        bool gimbal_uav_fusion = false; // 载机惯导数据融合开关 (参数 gimbal.send_uav_data)
+        uint8_t gimbal_last_stat = 0;
+        bool gimbal_last_tca = false;
     };
 
 } // namespace custom_link_bridge

@@ -122,7 +122,11 @@ namespace apm_bridge
         double current_heading = 0.0;
 
         std::unique_ptr<xfrobot::GimbalControl> gimbal;
-        
+
+        // ---- 云台状态 (仅云台工作线程的回调中读写) ----
+        uint8_t gimbal_last_stat = 0;
+        bool gimbal_last_tca = false;
+
         void setupMavlink();
 
         void armCallback(const std_msgs::msg::Bool::SharedPtr msg);

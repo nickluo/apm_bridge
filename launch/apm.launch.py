@@ -56,6 +56,7 @@ def generate_launch_description():
         parameters=[
             os.path.join(apm_bridge_pkg_share, 'parameters', 'airsim_parameters.yaml'),
             {'gimbal_port': LaunchConfiguration('gimbal_port')},
+            {'gimbal_model': LaunchConfiguration('gimbal_model')},
         ],
         remappings=[
             ('~/low_level_feedback', '/fpv/low_level_feedback'),
@@ -72,6 +73,11 @@ def generate_launch_description():
             'gimbal_port',
             default_value='/dev/ttyTHS2',
             description='Gimbal connection port.'
+        ),
+        DeclareLaunchArgument(
+            'gimbal_model',
+            default_value='C200T',
+            description="Gimbal model: 'C20S' (1-axis), 'C40D' (2-axis) or 'C200T' (3-axis)."
         ),
         DeclareLaunchArgument(
             'fcu_url',

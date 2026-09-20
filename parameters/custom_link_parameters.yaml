@@ -45,3 +45,26 @@ custom_link_bridge:
 
     # 留空则不启用云台线程。
     gimbal_port: ""
+
+    gimbal:
+      # 云台机型: C20S (单轴) / C40D (卧式两轴) / C200T (三轴)，决定参与控制的轴。
+      # 行程限位默认沿用三轴机现场调参数值，手册正文未给数值 (在图纸)，
+      # 换机型后务必按图纸实测并用下列参数覆盖。
+      model: "C20S"
+      # roll_min: -50.0    # deg
+      # roll_max: 50.0
+      # pitch_min: -135.0
+      # pitch_max: 40.0
+      # pitch_roll_speed_scale: 12.0
+      # yaw_speed_scale: 10.0
+      # max_angle_speed: 150.0
+      # ---- C-20S 单轴俯仰逻辑 (其余机型不使用) ----
+      # 常态: 锁定+角度控制保持期望俯仰角 (0=水平);
+      # |IMU滚转角| > roll_hold_enter (大坡度/倒飞): 锁定+零速保持当前俯仰角,
+      # 回落到 roll_hold_exit 以下恢复角度控制 (exit 设小于 enter 可构成迟滞)。
+      pitch_hold: 0.0
+      roll_hold_enter: 75.0
+      roll_hold_exit: 70.0
+      # 载机惯导数据融合 (提升机动飞行时的云台角度精度)。
+      # 加速度/偏航的符号约定尚未实机验证，验证前保持 false。
+      send_uav_data: false
