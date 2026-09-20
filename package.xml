@@ -1,9 +1,9 @@
 <?xml version="1.0"?>
-<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schemans="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
   <name>apm_bridge</name>
   <version>1.0.0</version>
-  <description>A ROS2 package for APM bridge</description>
+  <description>ROS2 bridge to a customized Betaflight FC via its dedicated binary link (custom_link), with direct XFrobot gimbal (C-20S) support over the vendor private protocol</description>
   <maintainer email="tianqiluo@deepglint.com">nick.luo</maintainer>
   <license>MIT</license>
 
@@ -11,9 +11,7 @@
 
   <depend>rclcpp</depend>
   <depend>std_msgs</depend>
-  <depend>geometry_msgs</depend>
   <depend>sensor_msgs</depend>
-  <depend>nav_msgs</depend>
   <depend>tf2</depend>
   <depend>tf2_ros</depend>
   <depend>tf2_geometry_msgs</depend>
@@ -22,9 +20,6 @@
 
   <exec_depend>rclpy</exec_depend>
   <exec_depend>python3-serial</exec_depend>
-  <exec_depend>python3-numpy</exec_depend>
-  <!-- 台架标定工具绘图为可选能力 (缺失时自动降级为仅存 PNG/CSV) -->
-  <exec_depend>python3-matplotlib</exec_depend>
 
   <export>
     <build_type>ament_cmake</build_type>

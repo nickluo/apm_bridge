@@ -11,9 +11,10 @@ def generate_launch_description():
     """
     Betaflight custom-link bridge.
 
-    Same ROS interface as the APM bridge, but talks the firmware's dedicated
-    high-frequency binary link (USE_CUSTOM_LINK, telemetry/custom_link.c) over
-    a serial port (real FC) or TCP (SITL simulation) instead of MAVLink.
+    Talks the customized firmware's dedicated high-frequency binary link
+    (USE_CUSTOM_LINK, telemetry/custom_link.c) over a serial port (real FC)
+    or TCP (SITL simulation), and drives an XFrobot gimbal (default C-20S)
+    over the vendor private protocol on a separate UART.
 
     Betaflight side requirements:
       * firmware built with USE_CUSTOM_LINK (custom_comm branch)
@@ -79,7 +80,7 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             'gimbal_model',
-            default_value='C200T',
+            default_value='C20S',
             description="Gimbal model: 'C20S' (1-axis), 'C40D' (2-axis) or 'C200T' (3-axis)."
         ),
         custom_link_node,
