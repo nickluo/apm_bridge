@@ -9,18 +9,25 @@ custom_link_bridge:
 
     channel_trigger: 6
 
+# VBAT fitted curve coefficients (a, b): (-0.0807027265046421, 2.7940133561356206)
+# 曲线为标准电压 V_ref = 6*3.7 = 22.2V 口径; 运行时按实时电压以 phi=(a*V+b)/(a*V_ref+b) 补偿
+# 注意: 当前 A..D 需用 --map-a/--map-b (力侧归一) 重扫后替换 -- 旧扫若用了旧版 map 语义则有偏
+# 旧系数 (疑似 12S 口径): A=0.0000793607 B=-0.004194295 C=0.104836283 D=-0.231665421 n=4
+
     motor_parameters:
-      A:  0.0000793607
-      B: -0.004194295
-      C:  0.104836283
-      D: -0.231665421
-      n:  4
+      A:  2.09854336e-06
+      B: -0.000192658377
+      C:  0.014300253
+      D:  0.00408880119
+      n:  1
       spin_k: 0.0
+      vbat_a: -0.0807027265046421
+      vbat_b: 2.7940133561356206
 
     link:
       # serial: 真机串口; tcp: SITL 仿真 (UART3 = tcp/5763)
       transport: "serial"
-      serial_port: "/dev/ttyTHS1"
+      serial_port: "/dev/ttyUSB1"
       baudrate: 921600
       tcp_host: "127.0.0.1"
       tcp_port: 5763

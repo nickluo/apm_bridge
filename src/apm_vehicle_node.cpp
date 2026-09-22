@@ -19,6 +19,8 @@ VehicleNode::VehicleNode()
     this->declare_parameter<double>("motor_parameters.C", 0.0);
     this->declare_parameter<double>("motor_parameters.D", 0.0);
     this->declare_parameter<int>("motor_parameters.n", 1);
+    this->declare_parameter<double>("motor_parameters.vbat_a", 0.0);
+    this->declare_parameter<double>("motor_parameters.vbat_b", 1.0);
     this->declare_parameter<double>("init_position.altitude", 100.0);
     this->declare_parameter<double>("init_position.latitude", 0.0);
     this->declare_parameter<double>("init_position.longitude", 0.0);
@@ -44,10 +46,13 @@ VehicleNode::VehicleNode()
     this->get_parameter("motor_parameters.n", motor_params.n_motors);
 
     motor_params.spin_k = 0.0;
+    this->get_parameter("motor_parameters.vbat_a", motor_params.vbat_a);
+    this->get_parameter("motor_parameters.vbat_b", motor_params.vbat_b);
     motor_params.volt_max = n_lipo_cells * kBatteryFullVoltagePerCell;
+    motor_params.volt_ref = n_lipo_cells * kBatteryNominalVoltagePerCell;
 
-    RCLCPP_INFO(this->get_logger(), "Motor parameters: A=%.6f, B=%.6f, C=%.6f, D=%.6f, n=%d, voltage_max=%.6f, spin_k=%.6f", 
-        motor_params.A, motor_params.B, motor_params.C, motor_params.D, motor_params.n_motors, motor_params.volt_max, motor_params.spin_k);
+    RCLCPP_INFO(this->get_logger(), "Motor parameters: A=%.6f, B=%.6f, C=%.6f, D=%.6f, n=%d, voltage_max=%.6f, spin_k=%.6f, vbat_a=%.6f, vbat_b=%.6f, volt_ref=%.6f",
+        motor_params.A, motor_params.B, motor_params.C, motor_params.D, motor_params.n_motors, motor_params.volt_max, motor_params.spin_k, motor_params.vbat_a, motor_params.vbat_b, motor_params.volt_ref);
 
     tf_br = std::make_shared<tf2_ros::TransformBroadcaster>(this);
     tf_br_static = std::make_shared<tf2_ros::StaticTransformBroadcaster>(this);

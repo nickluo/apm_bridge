@@ -52,6 +52,7 @@ namespace apm_bridge
 
     private:
         static constexpr double kBatteryFullVoltagePerCell = 4.2;
+        static constexpr double kBatteryNominalVoltagePerCell = 3.7;
         static constexpr double kBatteryLowVoltagePerCell = 3.6;
         static constexpr double kBatteryCriticalVoltagePerCell = 3.3;
         static constexpr double kBatteryInvalidVoltagePerCell = 3.0;

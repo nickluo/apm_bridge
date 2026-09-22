@@ -15,7 +15,10 @@ namespace quadratic_thrust_model
         double D;
         int n_motors;
         double spin_k;
-        double volt_max;
+        double volt_max;   // 满电电压 (cells*4.2): 线性补偿口径 (vbat 未启用时)
+        double vbat_a;     // vbat 电压模型 y = a*V + b (thrust_test_node --vbat 台架拟合)。
+        double vbat_b;     // a=0 (默认) 时未启用, 退回线性 volt_max/V 补偿。
+        double volt_ref;   // 标准电压 (cells*3.7 标称): A..D 曲线与 vbat 补偿的锚点
     };
 
     const double EPSILON = 1e-6; // 精度阈值
@@ -36,6 +39,15 @@ namespace quadratic_thrust_model
 
     // kp = (baro/101325.0) * (273.15/(273.15+temp));
 
+    // vbat 电压因子 phi(V) = (a*V+b)/(a*V_ref+b):
+    // 当前电压下的力 <-> 标准电压 (V_ref) 口径力 的换算。
+    // 标定端 (thrust_test_node --map-a/--map-b) 与本运行时对称使用。
+    static double vbatScale(const MotorParams &params, double battery_voltage)
+    {
+        return (params.vbat_a * battery_voltage + params.vbat_b) /
+               (params.vbat_a * params.volt_ref + params.vbat_b);
+    }
+
     double thrustToForce(const MotorParams &motor_params, double thrust, double kp, double battery_voltage = -1.0)
     {
         auto throttle = thrust / kp;
@@ -44,9 +56,12 @@ namespace quadratic_thrust_model
             throttle = (k_1 + std::sqrt(k_1 * k_1 + 4.0 * motor_params.spin_k * throttle)) /
                             (2.0 * motor_params.spin_k);
         }
-        
-        if (battery_voltage > 0)
-            throttle *= battery_voltage / motor_params.volt_max;    // voltage compensation
+
+        // vbat 补偿: 系数为标准电压口径, 多项式反解后换算回当前电压的实际力;
+        // 未启用时退回线性补偿 (油门侧)。
+        const bool vbat = battery_voltage > 0 && motor_params.vbat_a != 0.0;
+        if (battery_voltage > 0 && !vbat)
+            throttle *= battery_voltage / motor_params.volt_max;    // legacy linear voltage compensation
 
 
         double force = 0.0;
@@ -88,6 +103,8 @@ namespace quadratic_thrust_model
             x = next_x;
         }
 
+        if (vbat)
+            x /= vbatScale(motor_params, battery_voltage);    // 标准口径力 -> 当前电压实际力
         force = motor_params.n_motors * x;
         return force < 0.0 ? 0.0 : force;
     }
@@ -95,12 +112,18 @@ namespace quadratic_thrust_model
     double forceToThrust(const MotorParams &motor_params, double force, double kp, double battery_voltage = -1.0)
     {
         force /= motor_params.n_motors;
+
+        // vbat 补偿: 请求力换算到标准电压口径后进多项式 (入口缩放, 与标定端对称);
+        // 未启用时退回线性补偿 (油门出口侧)。
+        const bool vbat = battery_voltage > 0 && motor_params.vbat_a != 0.0;
+        if (vbat)
+            force *= vbatScale(motor_params, battery_voltage);
         auto force_2 = force * force;
         auto force_3 = force_2 * force;
 
         auto throttle = motor_params.A * force_3 + motor_params.B * force_2 + motor_params.C * force + motor_params.D;
-        if (battery_voltage > 0)
-            throttle *= motor_params.volt_max / battery_voltage;    // voltage compensation
+        if (battery_voltage > 0 && !vbat)
+            throttle *= motor_params.volt_max / battery_voltage;    // legacy linear voltage compensation
         auto thrust = (1.0 - motor_params.spin_k) * throttle + motor_params.spin_k * throttle * throttle; // linear compensation
         return thrust * kp; // air pressure compensation
     }
