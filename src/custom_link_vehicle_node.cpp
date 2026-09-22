@@ -107,6 +107,16 @@ CustomLinkVehicleNode::CustomLinkVehicleNode()
                 motor_params.n_motors, motor_params.volt_max, motor_params.spin_k,
                 motor_params.vbat_a, motor_params.vbat_b, motor_params.volt_ref);
 
+    // 反演曲线预拟合: thrustToForce 运行时以多项式求值替代牛顿迭代
+    const double fit_residual = quadratic_thrust_model::initInverseFit(motor_params);
+    if (fit_residual >= 0.0)
+        RCLCPP_INFO(this->get_logger(),
+                    "Thrust inverse fit: domain=[0, %.3f], %d cubic segments, max residual %.6f N (per-call Newton -> segment polyval)",
+                    motor_params.inv_t_max, motor_params.inv_segments, fit_residual);
+    else
+        RCLCPP_WARN(this->get_logger(),
+                    "Thrust inverse fit failed (degenerate samples?), thrustToForce falls back to Newton iteration");
+
     // ---------------- 云台 (可选, 支持 C-20S/C-40D/C-200T) ----------------
     std::string gimbal_port;
     this->get_parameter("gimbal_port", gimbal_port);
