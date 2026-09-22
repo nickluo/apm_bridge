@@ -39,7 +39,7 @@ def generate_launch_description():
                 'link.tcp_port': LaunchConfiguration('tcp_port'),
             },
             {'gimbal_port': LaunchConfiguration('gimbal_port')},
-            {'gimbal_model': LaunchConfiguration('gimbal_model')},
+            {'gimbal.model': LaunchConfiguration('gimbal_model')},
         ],
         remappings=[
             ('~/low_level_feedback', '/fpv/low_level_feedback'),

@@ -169,9 +169,9 @@ struct GimbalConfig
     static GimbalConfig defaultsFor(GimbalModel model);
 
     /**
-     * @brief 从 ROS 参数读取配置 (两段式: 先读 gimbal_model，再按机型默认值声明其余参数)
+     * @brief 从 ROS 参数读取配置 (两段式: 先读 gimbal.model，再按机型默认值声明其余参数)
      *
-     * 参数: gimbal_model ("C200T"|"C40D"|"C20S")，
+     * 参数: gimbal.model ("C200T"|"C40D"|"C20S")，
      *       gimbal.roll_min/roll_max, gimbal.pitch_min/pitch_max,
      *       gimbal.yaw_min/yaw_max (deg),
      *       gimbal.pitch_roll_speed_scale, gimbal.yaw_speed_scale,
