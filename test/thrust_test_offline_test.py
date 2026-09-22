@@ -40,6 +40,11 @@ SYN = {'A': 5.0e-5, 'B': -1.9e-3, 'C': 5.8e-2, 'D': 5.6e-3}
 N_MOTORS = 4
 LIPO_CELLS = 12
 PACK_V = LIPO_CELLS * 4.2          # volt_max: x_poly == commanded throttle
+VOLT_REF = LIPO_CELLS * 3.7         # 标准电压 (标称), vbat 曲线锚点
+# 12S 量程自洽的 vbat 直线 y=a*V+b: y(V_ref)=1, 局部等效指数 ~2
+VBAT_A = -2.0 / (VOLT_REF + 2.6)
+VBAT_B = 1.0 - VBAT_A * VOLT_REF
+SAG_PER_THRUST = 2.5                # 电池"IR 压降": 每单位油门掉的电压 [V]
 TARE = 8.0                          # kg on the scale at zero thrust
 GRAVITY = 9.801
 HOVER_ORIGINAL = 0.35
@@ -53,6 +58,21 @@ def syn_force_total(t):
         dp = 3.0 * SYN['A'] * f * f + 2.0 * SYN['B'] * f + SYN['C']
         f = max(f - (p - t) / dp, 0.0)
     return N_MOTORS * f
+
+
+def pack_voltage(throttle):
+    """电池电压: 标称电压附近随油门线性压降 (确定性 sag, 覆盖 V_ref 两侧)."""
+    return VOLT_REF + 0.8 - SAG_PER_THRUST * min(max(throttle, 0.0), 1.0)
+
+
+def vbat_scale(voltage):
+    """phi(V) = (a*V+b)/(a*V_ref+b), 与 quadratic_thrust_model.h 同口径."""
+    return (VBAT_A * voltage + VBAT_B) / (VBAT_A * VOLT_REF + VBAT_B)
+
+
+def force_at(throttle, voltage):
+    """vbat 电压模型下的总推力: F(t,V) = F0(t) / phi(V)."""
+    return syn_force_total(min(max(throttle, 0.0), 1.0)) / vbat_scale(voltage)
 
 
 class FakeBridge(Node):
@@ -94,7 +114,7 @@ class FakeBridge(Node):
             self.create_service(ParamSet, '/mavros/param/set', self.on_param_set)
 
         self.create_timer(0.2, self.publish_state)
-        self.create_timer(0.5, self.publish_battery)
+        self.create_timer(0.1, self.publish_battery)
         self.create_timer(0.02, self.publish_imu)
         self.create_timer(0.1, self.publish_weight)
         self.create_timer(0.5, self.publish_ambient)
@@ -156,10 +176,12 @@ class FakeBridge(Node):
         self.state_pub.publish(msg)
 
     def publish_battery(self):
+        with self.lock:
+            throttle = self.last_cmd.collective_thrust if self.last_cmd else 0.0
         msg = BatteryState()
         msg.header.stamp = self.get_clock().now().to_msg()
-        msg.voltage = PACK_V
-        msg.cell_voltage = [PACK_V]  # 本项目约定: 整包电压
+        msg.voltage = pack_voltage(throttle)
+        msg.cell_voltage = [msg.voltage]  # 本项目约定: 整包电压
         self.battery_pub.publish(msg)
 
     def publish_imu(self):
@@ -180,7 +202,8 @@ class FakeBridge(Node):
         with self.lock:
             armed = self.armed
             thrust = self.last_cmd.collective_thrust if self.last_cmd else 0.0
-        force = syn_force_total(min(max(thrust, 0.0), 1.0)) if armed else 0.0
+        # 真值物理: vbat 电压模型, 推力随 sag 电压按 1/phi(V) 变化
+        force = force_at(thrust, pack_voltage(thrust)) if armed else 0.0
         weight = TARE - force / GRAVITY
         self.weight_pub.publish(Float32MultiArray(data=[weight, weight]))
 
@@ -221,6 +244,20 @@ def numeric_self_test(results):
     else:
         print(f'  [FAIL] cubic fit round trip: {err}')
 
+    # vbat 补偿往返 (口径须与 quadratic_thrust_model.h 一致):
+    # 运行时 f_arg = f*phi(V), t = P(f_arg); 反向 f = P^-1(t)/phi(V)
+    ok = True
+    for V in (PACK_V, VOLT_REF, VOLT_REF - 1.5):
+        phi = tool.vbat_scale(VBAT_A, VBAT_B, VOLT_REF, V)
+        for f in (3.0, 8.0):
+            x = f * phi
+            t = SYN['A'] * x ** 3 + SYN['B'] * x ** 2 + SYN['C'] * x + SYN['D']
+            f_rt = syn_force_total(t) / N_MOTORS / phi
+            if abs(f_rt - f) > 1e-9:
+                ok = False
+    results['vbat_roundtrip'] = ok
+    print(f"  [{'PASS' if ok else 'FAIL'}] vbat scale round trip (force<->phi)")
+
 
 # ======================================================================
 # 2. fake-graph test
@@ -231,7 +268,8 @@ TOOL_ARGS = ['--yes', '--no-plot',
              '--min-thrust', '10', '--max-thrust', '40', '--step', '10',
              '--settle-time', '0.3', '--samples-per-point', '10',
              '--control-rate', '20', '--num-motors', str(N_MOTORS),
-             '--lipo-cells', str(LIPO_CELLS)]
+             '--lipo-cells', str(LIPO_CELLS),
+             '--map-a', str(VBAT_A), '--map-b', str(VBAT_B)]
 
 
 def run_tool_against_fake(backend, out_dir, results):
@@ -349,8 +387,15 @@ def check_tool_run(fake, backend, out_dir, results):
         for row, t in zip(rows, (0.1, 0.2, 0.3, 0.4)):
             if abs(float(row['thrust_norm']) - t) > 1e-6:
                 ok = False
+            # 工具记录的是 vbat 归一后的力: 恰好等于标准电压口径 F0(t)
             if abs(float(row['force_N']) - syn_force_total(t)) > 1e-3:
                 ok = False
+        # 各点电压确实不同 (归一化路径被真实 exercised)
+        results[f'{backend}_voltage_varied'] = \
+            len({round(float(r['voltage']), 2) for r in rows}) == len(rows)
+        print(f"  [{'PASS' if results[f'{backend}_voltage_varied'] else 'FAIL'}] "
+              f"voltage sag varied across sweep: "
+              f"{[round(float(r['voltage']), 2) for r in rows]}")
         # 结果 sidecar
         yaml_files = sorted(f for f in os.listdir(out_dir)
                             if f.endswith('_result.yaml'))

@@ -6,8 +6,11 @@
 桥接节点以 raw 通道直通油门，自动扫油门采集 (油门, 拉力) 数据点并拟合
 quadratic_thrust_model 所需的 motor_parameters 系数:
 
-    thrust = kp * ((1-k)*thr + k*thr^2),  thr = (A*f^3 + B*f^2 + C*f + D) * (volt_max/V)
+    thrust = kp * ((1-k)*thr + k*thr^2),  thr = A*f^3 + B*f^2 + C*f + D
     f = F_total / n  (单电机受力)
+    系数为标准电压 V_ref = lipo_cells*3.7 (标称) 口径: 标定时实测力经
+    f_ref = f * (a*V+b)/(a*V_ref+b) 归一 (--map-a/--map-b 来自 --vbat 拟合),
+    运行时桥接在多项式入口施加同一因子 (motor_parameters.vbat_a/vbat_b)。
 
 一个工具支持两种后端 (桥接节点需已运行)，两种后端均在 /fpv/static_pressure 与
 /fpv/temperature_baro 上提供环境气压/温度 (apm 桥转发 mavros，custom 桥来自 0x11
@@ -98,12 +101,21 @@ def inv_spin_map(s, k):
 def normalize_throttle(thrust_norm, kp, spin_k, voltage, volt_max, voltage_comp):
     """把命令油门 t 反解为多项式输入 thr: t = kp*spin(thr*[volt_max/V])。
 
-    volt_max 归一化的系数在电压补偿开启时才是运行时正确的口径。
+    volt_max 归一化的系数在电压补偿开启时才是运行时正确的口径；
+    --map-a/--map-b (vbat) 模式下不走本函数的电压项，电压归一在力侧完成。
     """
     x = inv_spin_map(thrust_norm / kp, spin_k)
     if voltage_comp and volt_max > 0.0 and voltage > 0.0:
         x *= voltage / volt_max
     return x
+
+
+def vbat_scale(a, b, vref, voltage):
+    """phi(V) = (a*V+b)/(a*V_ref+b): 当前电压力 <-> 标准电压口径力的换算因子。
+
+    与 quadratic_thrust_model.h 的 vbatScale 同口径，标定与运行时对称使用。
+    """
+    return (a * voltage + b) / (a * vref + b)
 
 
 def fit_motor_cubic(points, n_motors):
@@ -137,8 +149,11 @@ def fit_voltage_linear(points):
     return (float(poly.coef[1]), float(poly.coef[0])), None
 
 
-def render_param_yaml(node_key, fit, n_motors, spin_k, notes):
-    """生成可直接并入 parameters/*.yaml 的 motor_parameters 片段。"""
+def render_param_yaml(node_key, fit, n_motors, spin_k, vbat, notes):
+    """生成可直接并入 parameters/*.yaml 的 motor_parameters 片段。
+
+    vbat: (--map-a, --map-b) 元组，非 None 时一并写出 vbat_a/vbat_b。
+    """
     lines = [f'{node_key}:',
              '  ros__parameters:',
              '    motor_parameters:']
@@ -146,6 +161,9 @@ def render_param_yaml(node_key, fit, n_motors, spin_k, notes):
         lines.append(f'      {key}: {fit[key]:.9g}')
     lines.append(f'      n: {n_motors}')
     lines.append(f'      spin_k: {spin_k:.9g}')
+    if vbat is not None:
+        lines.append(f'      vbat_a: {vbat[0]:.9g}')
+        lines.append(f'      vbat_b: {vbat[1]:.9g}')
     for note in notes:
         lines.append(f'    # {note}')
     return '\n'.join(lines)
@@ -582,9 +600,8 @@ class ThrustTestNode(Node):
     def live_kp(self):
         with self.lock:
             kp = self.baro / 101325.0
-            if self.args.kp_temp:
-                temp = self.temp - self.args.temp_offset
-                kp *= 273.15 / (273.15 + temp)
+            temp = self.temp - self.args.temp_offset
+            kp *= 273.15 / (273.15 + temp)
         return kp
 
     def collect_kp(self):
@@ -647,15 +664,18 @@ class ThrustTestNode(Node):
         # 安全降油门后油门可能低于名义档位，按实际值记录
         throttle_pct = self.get_thrust()
         thrust_norm = throttle_pct / 100.0
-        if self.args.map_a != 0.0 or self.args.map_b != 0.0:
-            thrust_norm = (self.args.map_a * voltage + self.args.map_b) * thrust_norm
         volt_max = self.args.lipo_cells * 4.2
+        use_map = self.args.map_a != 0.0 or self.args.map_b != 0.0
         x_poly = normalize_throttle(thrust_norm, self.kp_avg, self.args.spin_k,
                                     voltage, volt_max,
-                                    not self.args.no_voltage_comp)
+                                    not self.args.no_voltage_comp and not use_map)
         with self.lock:
             tare = self.whole_weight
         force_n = (tare - weight) * self.args.gravity
+        if use_map:
+            # vbat 归一: 实测力换算到标准电压 V_ref = cells*3.7 口径
+            force_n *= vbat_scale(self.args.map_a, self.args.map_b,
+                                  self.args.lipo_cells * 3.7, voltage)
         ok = self.recorder.insert_normal(throttle_pct=throttle_pct,
                                          thrust_norm=thrust_norm,
                                          voltage=voltage, weight_kg=weight,
@@ -785,11 +805,17 @@ def write_outputs(node: ThrustTestNode, args, aborted):
     # ---- 拟合 ----
     node_key = 'apm_bridge' if args.backend == 'apm' else 'custom_link_bridge'
     volt_max = args.lipo_cells * 4.2
+    vref = args.lipo_cells * 3.7
+    use_map = args.map_a != 0.0 or args.map_b != 0.0
+    vbat = (args.map_a, args.map_b) if use_map else None
     notes = [f'fitted {datetime.datetime.now().isoformat(timespec="seconds")}, '
              f'backend={args.backend}, {len(points)} points, kp={node.kp_avg:.5f}, '
              f'gravity={args.gravity}',
              f'compensations divided out: kp, spin_k={args.spin_k}'
-             f'{", voltage normalized to volt_max=" + format(volt_max, ".1f") if not args.no_voltage_comp else ""}']
+             + (f', voltage via vbat map to V_ref={vref:.1f} '
+                f'(a={args.map_a:.6g}, b={args.map_b:.6g})' if use_map else
+                (', voltage normalized to volt_max=' + format(volt_max, '.1f')
+                 if not args.no_voltage_comp else ''))]
     fit = None
     vbat_fit = None
     if args.vbat:
@@ -799,6 +825,10 @@ def write_outputs(node: ThrustTestNode, args, aborted):
         else:
             print(f'{bcolors.OKGREEN}VBAT fitted curve coefficients (a, b): '
                   f'{vbat_fit}{bcolors.ENDC}')
+            print(f'{bcolors.OKBLUE}sweep with: --map-a {vbat_fit[0]:.10g} '
+                  f'--map-b {vbat_fit[1]:.10g}  (force normalized to '
+                  f'V_ref={args.lipo_cells * 3.7:.1f}; paste the same values as '
+                  f'motor_parameters.vbat_a/vbat_b){bcolors.ENDC}')
     else:
         fit, err = fit_motor_cubic(points, args.num_motors)
         if fit is None:
@@ -830,6 +860,10 @@ def write_outputs(node: ThrustTestNode, args, aborted):
             f.write(f'spin_k: {args.spin_k}\n')
             f.write(f'voltage_compensation: {not args.no_voltage_comp}\n')
             f.write(f'volt_max: {volt_max:.1f}\n')
+            f.write(f'volt_ref: {vref:.1f}\n')
+            if vbat:
+                f.write(f'vbat_a: {vbat[0]!r}\n')
+                f.write(f'vbat_b: {vbat[1]!r}\n')
             if getattr(node, 'hover_saved', None) is not None:
                 f.write(f'mot_thst_hover_original: {ThrustTestNode._param_value(node.hover_saved)}\n')
                 f.write(f'mot_thst_hover_override: {args.max_thrust / 100.0}\n')
@@ -846,7 +880,7 @@ def write_outputs(node: ThrustTestNode, args, aborted):
             f.write('\n# ---- paste into parameters/*.yaml ----\n')
             if fit:
                 f.write(render_param_yaml(node_key, fit, args.num_motors,
-                                          args.spin_k, notes) + '\n')
+                                          args.spin_k, vbat, notes) + '\n')
         print(f'result YAML written to {yaml_path}')
     except OSError as e:
         print(f'{bcolors.ERROR}cannot write result YAML: {e}{bcolors.ENDC}')
@@ -921,12 +955,15 @@ def parse_args():
                         help='battery voltage compensation test '
                              '(fixed throttle drain)')
     parser.add_argument('--map-a', type=float, default=0.0, dest='map_a',
-                        help='voltage mapping coefficient a (from --vbat fit)')
+                        help='vbat fit coefficient a (--vbat output); normalizes '
+                             'measured force to the V_ref=lipo_cells*3.7 curve; '
+                             'paste as motor_parameters.vbat_a')
     parser.add_argument('--map-b', type=float, default=0.0, dest='map_b',
-                        help='voltage mapping coefficient b (from --vbat fit)')
+                        help='vbat fit coefficient b, paired with --map-a '
+                             '(paste as motor_parameters.vbat_b)')
     parser.add_argument('--min-thrust', type=float, default=5.0, dest='min_thrust',
                         help='sweep start / idle throttle [%%]')
-    parser.add_argument('--max-thrust', type=float, default=90.0, dest='max_thrust',
+    parser.add_argument('--max-thrust', type=float, default=50.0, dest='max_thrust',
                         help='sweep end throttle [%%]; also the MOT_THST_HOVER '
                              'override (max/100)')
     parser.add_argument('--step', type=float, default=5.0,
@@ -945,9 +982,9 @@ def parse_args():
                         help='abort if scale weight drops below this while '
                              'testing [kg]')
     parser.add_argument('--gravity', type=float, default=9.801)
-    parser.add_argument('--lipo-cells', type=int, default=12, dest='lipo_cells',
+    parser.add_argument('--lipo-cells', type=int, default=6, dest='lipo_cells',
                         help='LiPo cell count (defines volt_max and vbat bounds)')
-    parser.add_argument('--num-motors', type=int, default=4, dest='num_motors',
+    parser.add_argument('--num-motors', type=int, default=1, dest='num_motors',
                         help='motor count (per-motor force = total/n)')
     parser.add_argument('--spin-k', type=float, default=0.0, dest='spin_k',
                         help='MOT_THST_EXPO style spin compensation already '
@@ -955,11 +992,7 @@ def parse_args():
     parser.add_argument('--kp', type=float, default=None,
                         help='air-density factor override (default: auto from the '
                              'bridge /fpv/static_pressure topic, 1.0 if absent)')
-    parser.add_argument('--kp-temp', action='store_true', dest='kp_temp',
-                        help='include the temperature ratio in kp (legacy '
-                             'kestrel_utils semantics; runtime bridges use '
-                             'pressure only)')
-    parser.add_argument('--temp-offset', type=float, default=20.0, dest='temp_offset',
+    parser.add_argument('--temp-offset', type=float, default=0.0, dest='temp_offset',
                         help='baro temperature offset used with --kp-temp [degC]')
     parser.add_argument('--no-voltage-comp', action='store_true', dest='no_voltage_comp',
                         help='do not normalize fitted coefficients to volt_max')
@@ -1026,6 +1059,10 @@ def main():
         else:
             print(f'{bcolors.OKBLUE}custom-link backend: the pilot must hold the '
                   f'BOXOFFBOARD switch for host arming{bcolors.ENDC}')
+        if args.map_a != 0.0 or args.map_b != 0.0:
+            print(f'{bcolors.OKBLUE}vbat map active: measured force normalized to '
+                  f'V_ref={args.lipo_cells * 3.7:.1f}V (phi=(a*V+b)/(a*V_ref+b)), '
+                  f'volt_max normalization skipped{bcolors.ENDC}')
         node.collect_kp()
         if not node.weight_event.wait(timeout=3.0):
             print(f'{bcolors.WARNING}no /current_weight data -- is '

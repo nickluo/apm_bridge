@@ -110,4 +110,8 @@ install(PROGRAMS scripts/thrust_test_node.py
 install(PROGRAMS scripts/scale_reader_node.py
   DESTINATION lib/${PROJECT_NAME} RENAME scale_reader_node)
 
+# 真机联调检查: 解锁 + 恒定油门 + 上锁
+install(PROGRAMS scripts/motor_check_node.py
+  DESTINATION lib/${PROJECT_NAME} RENAME motor_check_node)
+
 ament_package()
