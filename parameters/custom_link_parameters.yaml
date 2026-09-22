@@ -4,6 +4,10 @@ custom_link_bridge:
     mass: 2.0
 
     lipo_cells: 6
+    # 整包容量 (mAh)。/mavros/battery 的 charge/percentage 与 OSD 用量条依据，
+    # 按实际电池修改；0 = 未知 (percentage 发布 NaN)。
+    battery:
+      capacity_mah: 13000.0
     voltage_compensation: true
     baro_compensation: true
 

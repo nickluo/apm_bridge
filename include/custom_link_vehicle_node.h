@@ -8,11 +8,13 @@
 #include "quadrotor_msgs/msg/control_command.hpp"
 #include "quadrotor_msgs/msg/low_level_feedback.hpp"
 #include <mavros_msgs/msg/extended_state.hpp>
+#include <mavros_msgs/msg/gpsraw.hpp>
 #include <mavros_msgs/msg/rc_in.hpp>
 #include <mavros_msgs/msg/state.hpp>
 #include <sensor_msgs/msg/battery_state.hpp>
 #include <sensor_msgs/msg/fluid_pressure.hpp>
 #include <sensor_msgs/msg/imu.hpp>
+#include <sensor_msgs/msg/nav_sat_fix.hpp>
 #include <sensor_msgs/msg/temperature.hpp>
 
 #include <tf2/LinearMath/Quaternion.h>
@@ -65,6 +67,10 @@ namespace custom_link_bridge
         rclcpp::Publisher<quadrotor_msgs::msg::LowLevelFeedback>::SharedPtr ap_feedback_pub;
         rclcpp::Publisher<sensor_msgs::msg::Imu>::SharedPtr gimbal_imu_pub;
         rclcpp::Publisher<std_msgs::msg::Header>::SharedPtr trigger_pub;
+        // GPS / mAh / 失效保护 (0x12 PayloadSlow 携带，10 Hz)
+        rclcpp::Publisher<mavros_msgs::msg::GPSRAW>::SharedPtr gpsraw_pub;
+        rclcpp::Publisher<sensor_msgs::msg::NavSatFix>::SharedPtr navsat_pub;
+        rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr failsafe_pub;
 
         rclcpp::Subscription<quadrotor_msgs::msg::ControlCommand>::SharedPtr control_command_sub;
         rclcpp::Subscription<quadrotor_msgs::msg::ControlCommand>::SharedPtr control_command_raw_sub;
@@ -97,6 +103,7 @@ namespace custom_link_bridge
         double gravity = 9.80665;
         double mass = 2.0;
         int n_lipo_cells = 6;
+        double battery_capacity_mah = 13000.0; // 电池整包容量 (mAh)，0 = 未知
         int channel_trigger = 6;
         bool voltage_compensation = false;
         bool baro_compensation = true;

@@ -38,6 +38,7 @@ CustomLinkVehicleNode::CustomLinkVehicleNode()
     this->declare_parameter<double>("gravity_const", 9.80665);
     this->declare_parameter<double>("mass", 2.0);
     this->declare_parameter<int>("lipo_cells", 6);
+    this->declare_parameter<double>("battery.capacity_mah", 13000.0); // 整包容量
     this->declare_parameter<int>("channel_trigger", 6);
     this->declare_parameter<bool>("voltage_compensation", false);
     this->declare_parameter<bool>("baro_compensation", true);
@@ -70,6 +71,7 @@ CustomLinkVehicleNode::CustomLinkVehicleNode()
     this->get_parameter("gravity_const", gravity);
     this->get_parameter("mass", mass);
     this->get_parameter("lipo_cells", n_lipo_cells);
+    this->get_parameter("battery.capacity_mah", battery_capacity_mah);
     this->get_parameter("channel_trigger", channel_trigger);
     this->get_parameter("voltage_compensation", voltage_compensation);
     this->get_parameter("baro_compensation", baro_compensation);
@@ -151,6 +153,13 @@ CustomLinkVehicleNode::CustomLinkVehicleNode()
     ap_feedback_pub = this->create_publisher<quadrotor_msgs::msg::LowLevelFeedback>("~/low_level_feedback", 10);
     gimbal_imu_pub = this->create_publisher<sensor_msgs::msg::Imu>("/fpv/gimbal", 10);
     trigger_pub = this->create_publisher<std_msgs::msg::Header>("/fpv/tracker_trigger", 10);
+    // GPS / 失效保护 (0x12 PayloadSlow, 10 Hz)：沿用 MAVROS 话题名，OSD 与
+    // 其他节点可直接复用 mavros 消费习惯
+    gpsraw_pub = this->create_publisher<mavros_msgs::msg::GPSRAW>(
+        "/mavros/gpsstatus/gpsraw", rclcpp::QoS(rclcpp::KeepLast(10)).best_effort());
+    navsat_pub = this->create_publisher<sensor_msgs::msg::NavSatFix>(
+        "/mavros/global_position/global", rclcpp::QoS(rclcpp::KeepLast(10)).best_effort());
+    failsafe_pub = this->create_publisher<std_msgs::msg::Bool>("/fpv/failsafe", 10);
 
     control_command_sub = this->create_subscription<quadrotor_msgs::msg::ControlCommand>(
         "~/control_command", rclcpp::QoS(rclcpp::KeepLast(1)).best_effort(),
@@ -463,10 +472,25 @@ void CustomLinkVehicleNode::handleSlow(const custom_link::protocol::PayloadSlow 
     bat.header.stamp = rclcpp::Time(static_cast<int64_t>(hostUs) * 1000, RCL_ROS_TIME);
     bat.voltage = static_cast<float>(voltage);
     bat.current = static_cast<float>(-amperage); // ROS 约定放电为负
-    bat.charge = std::numeric_limits<float>::quiet_NaN();
-    bat.capacity = std::numeric_limits<float>::quiet_NaN();
-    bat.design_capacity = std::numeric_limits<float>::quiet_NaN();
-    bat.percentage = std::numeric_limits<float>::quiet_NaN();
+    // mAh 累计 (0x12 携带)。固件计数值单位为 mAh (int16)；
+    // 换算隔离在此常量，若固件侧改为其他单位只需调整这一处。
+    constexpr double kMahPerCount = 1.0;
+    const double consumed_ah = p.mah * kMahPerCount * 0.001;
+    bat.charge = static_cast<float>(consumed_ah); // 已耗 Ah (MAVROS sys_status 惯例)
+    if (battery_capacity_mah > 0.0)
+    {
+        const double capacity_ah = battery_capacity_mah * 0.001;
+        bat.capacity = static_cast<float>(capacity_ah);
+        bat.design_capacity = bat.capacity;
+        bat.percentage = static_cast<float>(
+            std::clamp(1.0 - consumed_ah / capacity_ah, 0.0, 1.0));
+    }
+    else
+    {
+        bat.capacity = std::numeric_limits<float>::quiet_NaN();
+        bat.design_capacity = std::numeric_limits<float>::quiet_NaN();
+        bat.percentage = std::numeric_limits<float>::quiet_NaN();
+    }
     bat.power_supply_status = sensor_msgs::msg::BatteryState::POWER_SUPPLY_STATUS_DISCHARGING;
     bat.power_supply_health = sensor_msgs::msg::BatteryState::POWER_SUPPLY_HEALTH_UNKNOWN;
     bat.power_supply_technology = sensor_msgs::msg::BatteryState::POWER_SUPPLY_TECHNOLOGY_LIPO;
@@ -492,6 +516,38 @@ void CustomLinkVehicleNode::handleSlow(const custom_link::protocol::PayloadSlow 
         fb->control_mode = use_rate.load() ? quadrotor_msgs::msg::LowLevelFeedback::BODY_RATES
                                            : quadrotor_msgs::msg::LowLevelFeedback::ATTITUDE;
     ap_feedback_pub->publish(std::move(fb));
+
+    // ---- GPS (0x12 PayloadSlow)：GPSRAW 全量 + NavSatFix 经纬度 ----
+    mavros_msgs::msg::GPSRAW gps;
+    gps.header.stamp = bat.header.stamp;
+    gps.fix_type = p.fix ? mavros_msgs::msg::GPSRAW::GPS_FIX_TYPE_3D_FIX
+                         : mavros_msgs::msg::GPSRAW::GPS_FIX_TYPE_NO_FIX;
+    gps.satellites_visible = p.sats;
+    gps.lat = p.lat_e7;   // degE7 直传
+    gps.lon = p.lon_e7;
+    gps.alt = p.alt_msl_cm * 10; // cm -> mm
+    gps.eph = std::numeric_limits<uint16_t>::max(); // 固件未提供精度信息
+    gps.epv = std::numeric_limits<uint16_t>::max();
+    gps.vel = p.gspeed_cms;      // cm/s
+    gps.cog = p.course_cdeg;     // 0.01 deg
+    gpsraw_pub->publish(std::move(gps));
+
+    sensor_msgs::msg::NavSatFix fix;
+    fix.header.stamp = bat.header.stamp;
+    fix.header.frame_id = "base_link";
+    fix.status.service = sensor_msgs::msg::NavSatStatus::SERVICE_GPS;
+    fix.status.status = p.fix ? sensor_msgs::msg::NavSatStatus::STATUS_FIX
+                              : sensor_msgs::msg::NavSatStatus::STATUS_NO_FIX;
+    fix.latitude = p.lat_e7 * 1e-7;
+    fix.longitude = p.lon_e7 * 1e-7;
+    fix.altitude = p.alt_msl_cm * 0.01;
+    fix.position_covariance_type = sensor_msgs::msg::NavSatFix::COVARIANCE_TYPE_UNKNOWN;
+    navsat_pub->publish(std::move(fix));
+
+    // ---- 失效保护标志 ----
+    std_msgs::msg::Bool failsafe;
+    failsafe.data = (p.status & custom_link::protocol::STATUS_FAILSAFE) != 0;
+    failsafe_pub->publish(std::move(failsafe));
 }
 
 void CustomLinkVehicleNode::publishState(uint32_t mode_flags, bool is_armed)
