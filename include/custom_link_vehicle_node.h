@@ -17,7 +17,7 @@
 #include <sensor_msgs/msg/nav_sat_fix.hpp>
 #include <sensor_msgs/msg/temperature.hpp>
 
-#include <tf2/LinearMath/Quaternion.h>
+#include <tf2/LinearMath/Quaternion.hpp>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 
 #include <array>
@@ -52,6 +52,7 @@ namespace custom_link_bridge
 
     private:
         static constexpr double kBatteryFullVoltagePerCell = 4.2;
+        static constexpr double kBatteryNominalVoltagePerCell = 3.7;
         static constexpr double kBatteryLowVoltagePerCell = 3.6;
         static constexpr double kBatteryCriticalVoltagePerCell = 3.3;
         static constexpr double kBatteryInvalidVoltagePerCell = 3.0;

@@ -48,6 +48,8 @@ CustomLinkVehicleNode::CustomLinkVehicleNode()
     this->declare_parameter<double>("motor_parameters.D", 0.0);
     this->declare_parameter<int>("motor_parameters.n", 4);
     this->declare_parameter<double>("motor_parameters.spin_k", 0.0);
+    this->declare_parameter<double>("motor_parameters.vbat_a", 0.0);
+    this->declare_parameter<double>("motor_parameters.vbat_b", 1.0);
     this->declare_parameter<std::string>("gimbal_port", "");
 
     this->declare_parameter<std::string>("link.transport", "serial"); // serial | tcp
@@ -81,7 +83,10 @@ CustomLinkVehicleNode::CustomLinkVehicleNode()
     this->get_parameter("motor_parameters.D", motor_params.D);
     this->get_parameter("motor_parameters.n", motor_params.n_motors);
     this->get_parameter("motor_parameters.spin_k", motor_params.spin_k);
+    this->get_parameter("motor_parameters.vbat_a", motor_params.vbat_a);
+    this->get_parameter("motor_parameters.vbat_b", motor_params.vbat_b);
     motor_params.volt_max = n_lipo_cells * kBatteryFullVoltagePerCell;
+    motor_params.volt_ref = n_lipo_cells * kBatteryNominalVoltagePerCell;
 
     double ori_stddev = 0.0, gyro_stddev = 0.0, acc_stddev = 0.0;
     this->get_parameter("imu.orientation_stddev", ori_stddev);
@@ -95,9 +100,10 @@ CustomLinkVehicleNode::CustomLinkVehicleNode()
     this->get_parameter("landed.airborne_altitude", airborne_altitude);
 
     RCLCPP_INFO(this->get_logger(),
-                "Motor parameters: A=%.6f, B=%.6f, C=%.6f, D=%.6f, n=%d, voltage_max=%.6f, spin_k=%.6f",
+                "Motor parameters: A=%.6f, B=%.6f, C=%.6f, D=%.6f, n=%d, voltage_max=%.6f, spin_k=%.6f, vbat_a=%.6f, vbat_b=%.6f, volt_ref=%.6f",
                 motor_params.A, motor_params.B, motor_params.C, motor_params.D,
-                motor_params.n_motors, motor_params.volt_max, motor_params.spin_k);
+                motor_params.n_motors, motor_params.volt_max, motor_params.spin_k,
+                motor_params.vbat_a, motor_params.vbat_b, motor_params.volt_ref);
 
     // ---------------- 云台 (可选, 支持 C-20S/C-40D/C-200T) ----------------
     std::string gimbal_port;

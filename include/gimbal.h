@@ -9,7 +9,7 @@
 #include <chrono>
 
 #include <rclcpp/rclcpp.hpp>
-#include <tf2/LinearMath/Quaternion.h>
+#include <tf2/LinearMath/Quaternion.hpp>
 #include <sensor_msgs/msg/imu.hpp>
 
 #include "serial/serial.h"

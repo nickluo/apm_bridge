@@ -13,6 +13,12 @@ custom_link_bridge:
 
     channel_trigger: 6
 
+    # vbat 电压补偿模型 (lyrical 分支台架拟合, 6S 口径, V_ref = 6*3.7 = 22.2V):
+    #   vbat_a: -0.0807027265046421
+    #   vbat_b: 2.7940133561356206
+    # vbat_a = 0 (默认) 时未启用, 退回线性 volt_max/V 补偿, 行为与旧版一致。
+    # 注意: 启用 vbat 前须用 thrust_test_node --map-a/--map-b (力侧归一) 重扫
+    # A..D 替换下方旧系数 (旧扫描疑似 12S 口径, 语义不匹配)。
     motor_parameters:
       A:  0.0000793607
       B: -0.004194295
@@ -20,6 +26,8 @@ custom_link_bridge:
       D: -0.231665421
       n:  4
       spin_k: 0.0
+      vbat_a: 0.0
+      vbat_b: 1.0
 
     link:
       # serial: 真机串口; tcp: SITL 仿真 (UART3 = tcp/5763)
