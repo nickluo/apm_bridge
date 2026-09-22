@@ -46,7 +46,8 @@ CustomLinkVehicleNode::CustomLinkVehicleNode()
     this->declare_parameter<double>("motor_parameters.B", 0.0);
     this->declare_parameter<double>("motor_parameters.C", 0.0);
     this->declare_parameter<double>("motor_parameters.D", 0.0);
-    this->declare_parameter<int>("motor_parameters.n", 4);
+    this->declare_parameter<int>("motor_parameters.n", 1);
+    this->declare_parameter<double>("motor_parameters.thrust_limit", 1.0);
     this->declare_parameter<double>("motor_parameters.spin_k", 0.0);
     this->declare_parameter<double>("motor_parameters.vbat_a", 0.0);
     this->declare_parameter<double>("motor_parameters.vbat_b", 1.0);
@@ -82,6 +83,7 @@ CustomLinkVehicleNode::CustomLinkVehicleNode()
     this->get_parameter("motor_parameters.C", motor_params.C);
     this->get_parameter("motor_parameters.D", motor_params.D);
     this->get_parameter("motor_parameters.n", motor_params.n_motors);
+    this->get_parameter("motor_parameters.thrust_limit", motor_params.thrust_limit);
     this->get_parameter("motor_parameters.spin_k", motor_params.spin_k);
     this->get_parameter("motor_parameters.vbat_a", motor_params.vbat_a);
     this->get_parameter("motor_parameters.vbat_b", motor_params.vbat_b);

@@ -14,6 +14,7 @@ namespace quadratic_thrust_model
         double C;
         double D;
         int n_motors;
+        double thrust_limit;
         double spin_k;
         double volt_max;   // 满电电压 (cells*4.2): 线性补偿口径 (vbat 未启用时)
         double vbat_a;     // vbat 电压模型 y = a*V + b (thrust_test_node --vbat 台架拟合)。
@@ -125,7 +126,10 @@ namespace quadratic_thrust_model
         if (battery_voltage > 0 && !vbat)
             throttle *= motor_params.volt_max / battery_voltage;    // legacy linear voltage compensation
         auto thrust = (1.0 - motor_params.spin_k) * throttle + motor_params.spin_k * throttle * throttle; // linear compensation
-        return thrust * kp; // air pressure compensation
+        thrust *= kp; // air pressure compensation
+        if (motor_params.thrust_limit > 0.0 && thrust > motor_params.thrust_limit)
+            thrust = motor_params.thrust_limit;
+        return thrust; 
     }
 
 } // namespace quadratic_thrust_model

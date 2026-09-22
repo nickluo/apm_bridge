@@ -1,38 +1,35 @@
 custom_link_bridge:
   ros__parameters:
     gravity_const: 9.801
-    mass: 2.0
+    mass: 1.0
 
     lipo_cells: 6
     # 整包容量 (mAh)。/mavros/battery 的 charge/percentage 与 OSD 用量条依据，
     # 按实际电池修改；0 = 未知 (percentage 发布 NaN)。
     battery:
-      capacity_mah: 13000.0
+      capacity_mah: 1800.0
     voltage_compensation: true
     baro_compensation: true
 
-    channel_trigger: 6
+    channel_trigger: 10
 
     # vbat 电压补偿模型 (lyrical 分支台架拟合, 6S 口径, V_ref = 6*3.7 = 22.2V):
-    #   vbat_a: -0.0807027265046421
-    #   vbat_b: 2.7940133561356206
     # vbat_a = 0 (默认) 时未启用, 退回线性 volt_max/V 补偿, 行为与旧版一致。
-    # 注意: 启用 vbat 前须用 thrust_test_node --map-a/--map-b (力侧归一) 重扫
-    # A..D 替换下方旧系数 (旧扫描疑似 12S 口径, 语义不匹配)。
     motor_parameters:
-      A:  0.0000793607
-      B: -0.004194295
-      C:  0.104836283
-      D: -0.231665421
-      n:  4
+      A:  2.26453885e-06
+      B: -0.00026519864
+      C:  0.0179075134
+      D:  0.0119440187
+      n:  1
+      thrust_limit: 0.5
       spin_k: 0.0
-      vbat_a: 0.0
-      vbat_b: 1.0
+      vbat_a: -0.0776732
+      vbat_b:  2.7346374
 
     link:
       # serial: 真机串口; tcp: SITL 仿真 (UART3 = tcp/5763)
       transport: "serial"
-      serial_port: "/dev/ttyTHS1"
+      serial_port: "/dev/ttyS8"
       baudrate: 921600
       tcp_host: "127.0.0.1"
       tcp_port: 5763
@@ -56,7 +53,7 @@ custom_link_bridge:
       airborne_altitude: 0.5
 
     # 留空则不启用云台线程。
-    gimbal_port: ""
+    gimbal_port: "/dev/ttyS10"
 
     gimbal:
       # 云台机型: C20S (单轴) / C40D (卧式两轴) / C200T (三轴)，决定参与控制的轴。

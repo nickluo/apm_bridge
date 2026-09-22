@@ -6,6 +6,7 @@
 build.sh
 .idea/
 .vscode/
+.claude/
 build/
 src/test
 src/test.cpp

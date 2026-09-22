@@ -111,8 +111,6 @@ GimbalConfig GimbalConfig::defaultsFor(GimbalModel model)
 GimbalConfig GimbalConfig::fromParameters(rclcpp::Node &node)
 {
     // 第一段: 机型名决定轴存在性与默认限位
-    // 参数名 gimbal.model 与 yaml 嵌套结构一致 (曾用扁平名 gimbal_model,
-    // 与 yaml 的 gimbal.model 不匹配导致机型被默认 C200T 覆盖)。
     node.declare_parameter<std::string>("gimbal.model", "C200T");
     std::string model_name;
     node.get_parameter("gimbal.model", model_name);
