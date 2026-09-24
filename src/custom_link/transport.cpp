@@ -67,10 +67,11 @@ namespace custom_link
         {
             // WJ Wood 的 read(buf, size) 会等到读满或超时，直接读大块会引入
             // 整段超时的时延；先查可读量再精确读取，无数据时短暂等待。
+            // 空闲等待粒度取 1ms：T4 时间戳（对时精度）直接受读取唤醒延迟影响。
             size_t avail = serial_.available();
             if (avail == 0)
             {
-                const auto ms = std::min<int64_t>(timeout.count(), 5);
+                const auto ms = std::min<int64_t>(timeout.count(), 1);
                 std::this_thread::sleep_for(std::chrono::milliseconds(ms));
                 avail = serial_.available();
                 if (avail == 0)

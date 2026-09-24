@@ -2,7 +2,8 @@
 
 //
 // 自定义链路主机端客户端：传输无关 (串口/TCP)、读取线程 + 发送线程、
-// 四时间戳软同步。遥测回调在读取线程上下文调用，注意不要阻塞。
+// 四时间戳软同步（内部单调钟域，偏置+漂移率联合模型，输出映射回墙钟）。
+// 遥测回调在读取线程上下文调用，注意不要阻塞。
 //
 
 #include <atomic>
@@ -22,11 +23,12 @@ namespace custom_link
     struct TimeSyncState
     {
         bool valid = false;          // 已有可用时差模型
-        double rtt_ms = 0.0;         // 平滑后的往返延迟
-        double offset_ms = 0.0;      // 平滑后的偏置 B = host - fc（墙钟减 FC uptime，
-                                      // 绝对数值巨大属正常；看稳定性看 rtt/jitter）
-        double jitter_ms = 0.0;      // 最近一次 RTT 与平滑值之差
-        uint64_t last_ok_ms = 0;     // 最近一次成功对时 (主机时钟 ms)
+        double rtt_ms = 0.0;         // 平滑后的最小往返延迟（延迟最优估计）
+        double offset_ms = 0.0;      // 偏置 B = wall - fc（墙钟减 FC uptime，
+                                      // 绝对数值巨大属正常；看稳定性看 rtt/jitter/skew）
+        double jitter_ms = 0.0;      // RTT 相对下限的超额量（平滑，>=0）
+        double skew_ppm = 0.0;       // FC 相对主机的时钟漂移率（实测可达 ±7000 ppm）
+        uint64_t last_ok_ms = 0;     // 最近一次成功对时 (主机单调钟 ms)
     };
 
     struct ControlInput
@@ -44,8 +46,12 @@ namespace custom_link
         uint64_t reconnects = 0;
     };
 
-    /// 主机墙钟 (system_clock, us)。所有时间戳/T1/T4 与 ROS 节点时钟同域。
+    /// 主机墙钟 (system_clock, us)。与 ROS 节点时钟同域，仅用于输出侧。
     uint64_t hostClockUs();
+    /// 主机墙钟 (system_clock, us)。
+    uint64_t wallClockUs();
+    /// 主机单调钟 (steady_clock, us)。对时模型的内部时基，免疫 NTP 调整。
+    uint64_t monoClockUs();
 
     class Client
     {
@@ -101,6 +107,33 @@ namespace custom_link
         void sendControlFrame(bool arm, const ControlInput &input);
         void sendTimesync();
 
+        // ---- 对时模型（均持 sync_mtx_ 调用） ----
+        // 偏置 B = mono - fc 并非常数：两侧时钟速率不同（实测 FC 快 ~6800 ppm），
+        // B 以固定斜率漂移。故模型 = 质量过滤后的样本环 + 最小二乘拟合
+        // B(t) = b0 + c1*(t-t0)，查表时外推，天然跟踪任意漂移率。
+        struct SyncSample
+        {
+            uint64_t tUs;  // T4 时刻（单调钟）
+            int64_t bUs;   // NTP 对称差偏置
+        };
+        void resetSyncLocked();                        // 清空模型（重连/FC重启/重锁定）
+        void refitLocked();                            // 环内样本 LSQ 拟合
+        int64_t offsetAtLocked(uint64_t tUs) const;    // t 时刻偏置（拟合/退化模式）
+
+        static constexpr int kSyncRing = 16;
+        SyncSample ring_[kSyncRing]{};
+        int ring_count_ = 0;
+        int ring_head_ = 0;
+        bool fit_valid_ = false;
+        double fit_t0_ = 0.0;       // 拟合中心点（数值稳定性）
+        double fit_b0_ = 0.0;
+        double fit_c1_ = 0.0;       // 漂移率（钳位 ±2%）
+        int64_t rtt_floor_us_ = -1; // RTT 下限（向下立即、向上按速率老化）
+        uint64_t last_sample_us_ = 0;
+        uint64_t prev_f3_us_ = 0;   // 上一响应的 FC 侧参考（跳变检测）
+        int outlier_streak_ = 0;    // 连续野值计数（→重锁定）
+        uint64_t last_ext_ts_us_ = 0; // 遥测时间线回退检测（FC 重启）
+
         static void parserTrampoline(const protocol::Frame &frame, uint64_t completeUs, void *ctx)
         {
             static_cast<Client *>(ctx)->handleFrame(frame, completeUs);
@@ -132,7 +165,6 @@ namespace custom_link
         // 时间同步（读取线程写，任意线程读；互斥保护）
         mutable std::mutex sync_mtx_;
         TimeSyncState sync_;
-        int64_t fc_offset_us_ = 0;    // FC = host + offset
         uint64_t fc_ref_us_ = 0;      // 最近一次对时的 FC 侧 u64 参考点
         std::atomic<uint64_t> pending_t1_{0}; // 在途请求的 T1
 

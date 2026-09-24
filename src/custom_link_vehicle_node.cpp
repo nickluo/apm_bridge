@@ -311,9 +311,9 @@ CustomLinkVehicleNode::CustomLinkVehicleNode()
             if (!sync.valid)
                 return;
             RCLCPP_INFO(this->get_logger(),
-                        "Custom link: rtt %.2f ms (jitter %+.2f), FC offset %+.2f ms, "
+                        "Custom link: rtt %.2f ms (jitter %.2f), skew %+.0f ppm, FC offset %+.2f ms, "
                         "rx %lu (F:%u M:%u S:%u), tx %lu, reconnects %lu",
-                        sync.rtt_ms, sync.jitter_ms, sync.offset_ms,
+                        sync.rtt_ms, sync.jitter_ms, sync.skew_ppm, sync.offset_ms,
                         static_cast<unsigned long>(stats.rx_frames),
                         stats.rx_per_msg[custom_link::protocol::MSG_FC_FAST & 7u],
                         stats.rx_per_msg[custom_link::protocol::MSG_FC_MEDIUM & 7u],
