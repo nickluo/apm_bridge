@@ -268,6 +268,19 @@ def main():
         ok = wait_for("bridge connected + armed state received",
                       lambda: observer.state_count > 0, timeout=30)
 
+        # 外部幽灵发布者守卫：本测试的速率/时戳指标假设 /mavros/imu/data 上
+        # 只有被测节点一个发布者。曾出现过残留的旧 bridge 实例/中继进程在同
+        # domain 上重发同一话题，导致遥测"翻倍"（~390 Hz）与时戳滞后 ~90 ms
+        # 的假失败。多发布者时直接给出诊断而不是让后面的断言莫名失败。
+        n_pubs = observer.count_publishers("/mavros/imu/data")
+        results["single_publisher"] = n_pubs <= 1
+        if n_pubs > 1:
+            print(f"  [FAIL] {n_pubs} publishers on /mavros/imu/data "
+                  "(expect only custom_link_bridge_under_test). Find it with: "
+                  "ros2 topic info /mavros/imu/data -v   (look for "
+                  "_NODE_NAME_UNKNOWN_), then kill that process. Alternatively "
+                  "run this test under a clean ROS_DOMAIN_ID.")
+
         print("== 2. telemetry rates (3 s window) ==")
         i0, r0, s0 = observer.imu_count, observer.rc_count, observer.state_count
         time.sleep(3.0)
