@@ -339,8 +339,15 @@ CustomLinkVehicleNode::~CustomLinkVehicleNode()
 
 void CustomLinkVehicleNode::handleFast(const custom_link::protocol::PayloadFast &p, int64_t hostUs)
 {
-    // Betaflight 机体系 x 前 / y 右 / z 上（MultiWii 遗留，左手系）：
-    // 转 ROS FLU：y 取反；角速度的 pitch/yaw 再取反（FLU 下抬头为负 pitch）。
+    // Betaflight 原生传感器/姿态与 ROS FLU 完全同轴同号，全部直通即可
+    //（SITL 刚体闭环实证 src/test/sitl/sitl_custom_link_frames_test.py，
+    // 固件三源互证 mavlink.c/sitl_gyro.h/pid.c pidLevel）：
+    //   acc   = FLU（x 前、y 左、z 上，水平 z=+1g）
+    //   gyro  = FLU 角速度（roll 右滚+、pitch 低头+ 即 FLU +y、yaw 逆时针+）
+    //   姿态  = FLU 代数 RPY（roll 右滚+、pitch 低头+），yaw 右手系数学角
+    //（逆时针+，0=磁北）。tf2 setRPY 即标准 ZYX 代数，pitch 参数同为低头正。
+    // 此前代码误将 BF 当作左手系而取反 gyro/acc 的 y 与上行 pitch/yaw 速率，
+    // 导致闭环 pitch 发散（真机 OFFBOARD 失控根因）。
     const double ax = p.acc[0] * 0.001 * gravity;
     const double ay = p.acc[1] * 0.001 * gravity;
     const double az = p.acc[2] * 0.001 * gravity;
@@ -350,11 +357,10 @@ void CustomLinkVehicleNode::handleFast(const custom_link::protocol::PayloadFast 
 
     {
         std::lock_guard<std::mutex> lk(mtx_att);
-        accel_flu = {ax, -ay, az};
-        gyro_flu = {gx, -gy, -gz};
-        // 协议姿态即 FLU 右手系 (REP-103)：roll 左滚为正、pitch 抬头为负
-        //（Betaflight 原生欧拉角，实测验证）、yaw 逆时针为正。roll/pitch 直接
-        // 透传；yaw 从"0=磁北"旋转到 ENU 数学角 (0=东)：yaw_enu = yaw + pi/2。
+        accel_flu = {ax, ay, az};
+        gyro_flu = {gx, gy, gz};
+        // 姿态直通；yaw 仅做参考角旋转："0=磁北" → ENU 数学角 (0=东)：
+        // yaw_enu = yaw + pi/2。
         roll_flu = p.attitude[0] * 0.01 * kDegToRad;
         pitch_flu = p.attitude[1] * 0.01 * kDegToRad;
         yaw_enu = normalizeAngle(p.attitude[2] * 0.01 * kDegToRad + M_PI_2);
@@ -363,15 +369,15 @@ void CustomLinkVehicleNode::handleFast(const custom_link::protocol::PayloadFast 
     current_heading.store(yaw_enu);
 
     // 云台载机惯导数据融合 (协议 V1.0.4, 默认关闭)。
-    // 姿态角符号 (据协议附录1/2推导): 云台载机系为 FRD, 其"滚转右滚为正、
-    // 俯仰抬头为正、偏航顺时针为正"; 而 BF 实测姿态为 roll 左滚为正、
-    // pitch 抬头为负、yaw 逆时针为正 → 三轴均取反。
-    // 偏航为 BF 磁北/上电航向, 与云台世界系零位存在未验证的偏移。
-    // 加速度: 机体系(含重力)去重力后旋转到 NEU (协议要求大地系, 0.01m/s2)。
+    // 云台载机系为 FRD: 滚转右滚为正、俯仰抬头为正、偏航顺时针为正。
+    // BF 姿态: roll 右滚正（直通）、pitch 低头正（取反）、yaw 逆时针数学角
+    //（取反得顺时针）。偏航为 BF 磁北/上电航向, 与云台世界系零位存在未
+    // 验证的偏移。加速度: 机体系(含重力)去重力后旋转到 NEU (协议要求大地系,
+    // 0.01m/s2)。
     if (gimbal && gimbal_uav_fusion)
     {
         const int16_t angle_cdeg[3] = {
-            static_cast<int16_t>(-p.attitude[0]),
+            static_cast<int16_t>(p.attitude[0]),
             static_cast<int16_t>(-p.attitude[1]),
             static_cast<int16_t>(-p.attitude[2])};
 
@@ -630,10 +636,11 @@ void CustomLinkVehicleNode::pushControl()
         {
             if ((this->now() - cmd_stamp).seconds() < control_timeout)
             {
-                // ROS FLU rad/s -> Betaflight 体轴 deg/s：pitch/yaw 取反
+                // ROS FLU rad/s -> Betaflight 体轴 deg/s：同轴同号，直通换算
+                //（BF 陀螺仪域即 FLU 角速度，见 handleFast 注释）。
                 input.rate_dps[0] = cmd_bodyrates[0] * kRadToDeg;
-                input.rate_dps[1] = -cmd_bodyrates[1] * kRadToDeg;
-                input.rate_dps[2] = -cmd_bodyrates[2] * kRadToDeg;
+                input.rate_dps[1] = cmd_bodyrates[1] * kRadToDeg;
+                input.rate_dps[2] = cmd_bodyrates[2] * kRadToDeg;
                 input.throttle = cmd_thrust;
                 fresh = true;
             }
