@@ -579,13 +579,9 @@ void CustomLinkVehicleNode::publishState(uint32_t mode_flags, bool is_armed)
     namespace mode = custom_link::protocol::mode;
 
     // OFFBOARD 是自定义链路的接管模式，等价于 ArduPilot GUIDED / 旧 MSP_OVERRIDE。
-    if (mode_flags & mode::OFFBOARD)
-        hoverable.store(2);
-    else if ((mode_flags & mode::ANGLE) || (mode_flags & mode::HORIZON))
-        hoverable.store(1);
-    else
-        hoverable.store(0);
-    rc_manual.store(hoverable.load() != 2);
+    const bool offboard = mode_flags & mode::OFFBOARD;
+
+    rc_manual.store(!offboard);
 
     const double alt = altitude_m.load();
     if (!is_armed)
@@ -599,19 +595,25 @@ void CustomLinkVehicleNode::publishState(uint32_t mode_flags, bool is_armed)
     state.header.stamp = this->now();
     state.connected = client->isUp();
     state.armed = is_armed;
-    state.guided = (hoverable.load() == 2);
-    state.manual_input = rc_manual.load();
-    switch (hoverable.load())
-    {
-    case 2:
+    state.guided = offboard;
+    state.manual_input = !offboard;
+
+    if (offboard) {
         state.mode = "OFFBOARD";
-        break;
-    case 1:
-        state.mode = (mode_flags & mode::ANGLE) ? "ANGLE" : "HORIZON";
-        break;
-    default:
-        state.mode = "ACRO";
-        break;
+    }
+    else {
+        bool plus = false;
+        for(auto i = 0; i < mode_strings.size(); ++i) {
+            if (mode_flags & (1u << i)) {
+                if (plus)
+                    state.mode += "|";
+                else 
+                    plus = true;
+                state.mode += mode_strings[i];
+            }
+        }
+        if (!plus)
+            state.mode = "ACRO";
     }
     state_pub->publish(state);
 

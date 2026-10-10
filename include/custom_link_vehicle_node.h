@@ -25,6 +25,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <vector>
 
 #include "custom_link/client.h"
 #include "quadratic_thrust_model.h"
@@ -56,6 +57,23 @@ namespace custom_link_bridge
         static constexpr double kBatteryLowVoltagePerCell = 3.6;
         static constexpr double kBatteryCriticalVoltagePerCell = 3.3;
         static constexpr double kBatteryInvalidVoltagePerCell = 3.0;
+
+        std::vector<std::string> mode_strings = {
+            "ANGLE",
+            "HORIZON",
+            "",
+            "ALT_HOLD",
+            "",
+            "POS_HOLD",
+            "HEADFREE",
+            "",
+            "PASSTHRU",
+            "",
+            "FAILSAFE",
+            "RTH",
+            "AUTO",
+            "OFFBOARD"
+        };
 
         // ---- ROS 接口 ----
         rclcpp::Publisher<sensor_msgs::msg::Imu>::SharedPtr imu_pub;
@@ -140,7 +158,6 @@ namespace custom_link_bridge
         bool att_valid = false;
 
         std::atomic_bool armed{false};
-        std::atomic_uint8_t hoverable{0}; // 0: 不可外控 1: 自稳 2: OFFBOARD
         std::atomic_uint8_t landed_state{mavros_msgs::msg::ExtendedState::LANDED_STATE_UNDEFINED};
         std::atomic_bool in_tracking{false};
         std::atomic_bool radar_tracking{false};
