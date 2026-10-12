@@ -8,6 +8,7 @@
 #include <netinet/tcp.h>
 #include <poll.h>
 #include <sys/socket.h>
+#include <thread>
 #include <unistd.h>
 
 namespace custom_link
@@ -148,14 +149,17 @@ namespace custom_link
         const auto deadline = std::chrono::steady_clock::now() + timeout;
         do
         {
-            std::lock_guard<std::mutex> lock(mutex_);
+            std::unique_lock<std::mutex> lock(mutex_);
             if (!fc_.isOpen() || !servicePeer())
                 return -1;
-            const int count = fc_.read(buf, n, std::chrono::milliseconds(1));
+            const int count = fc_.read(buf, n, std::chrono::milliseconds(0));
             if (count <= 0)
             {
                 if (count < 0)
                     return -1;
+                // Do not hold/reacquire the IO lock while waiting; the control sender needs it too.
+                lock.unlock();
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
                 continue;
             }
             if (peer_ >= 0)

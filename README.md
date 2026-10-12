@@ -112,6 +112,86 @@ Euler slots in `orientation_covariance[0:3]`. Angular velocity is derived from
 successive camera poses, and marked unavailable until two poses arrive.
 Camera API failure is logged and does not stop custom-link flight telemetry.
 
+## GPS local odometry
+
+`/fpv/odom` publishes `nav_msgs/msg/Odometry` with sensor-data QoS (best effort),
+driven by the firmware's new **0x14** telemetry stream at **100 Hz**. No MSP or
+AirSim pose API is used for odometry. Both the FC firmware and bridge must be
+updated; older peers ignore the new message ID without affecting other streams.
+The payload is now 64 bytes, including ARM heading; the former 62-byte form is
+rejected rather than interpreted with an invented heading.
+
+The successful ARM edge captures both a GPS origin and the horizontal heading
+for this flight. In `header.frame_id="odom"`, **X follows the initial ARM heading,
+Y points left, Z points up**, and position is in meters. This is a fixed,
+heading-aligned local frame, not compass ENU and not the current body frame.
+The firmware keeps its ENU fusion/navigation coordinates unchanged; the bridge
+rotates position, orientation and pose covariance by the inverse ARM yaw.
+`child_frame_id` uses `imu.frame_id` (`base_link` by default).
+ROS requires twist in the child frame, so velocity and its covariance remain
+body **FLU**, with angular rates in rad/s. The captured heading is present in
+every packet, allowing correct interpretation even when the bridge connects
+after ARM or after the aircraft has turned.
+FC Kalman position/velocity covariance accompanies each sample; unknown IMU
+uncertainty is represented conservatively, not as a zero-uncertainty estimate.
+
+Publication requires an armed FC, a fresh GPS **3D FIX**, an origin captured
+with 3D FIX at ARM, and valid/fresh XY and Z fusion. For NMEA, a checksum-valid
+GSA sentence with fix type 3 is required; GGA's general fix flag alone is not
+treated as 3D. UBX already requires a valid FIX_3D. Sensor source settings are
+respected (GPS-only, barometer, rangefinder, optical flow); no fresh fused
+solution means no fabricated odometry.
+
+Before ARM and after disarming there is no odometry. GPS loss pauses it; recovery
+retains the original ARM position and heading even if the internal XY estimator
+recaptures its own reference. Re-arming creates a new position/heading origin. If ARM occurred without
+3D FIX, this flight remains without odometry even after GPS acquisition: re-arm
+with 3D FIX to establish the requested ARM origin. No automatic TF is published.
+
+Wire layout (64-byte payload; all fields little-endian):
+
+| Field | Type | Units |
+|---|---|---|
+| `ts_us` | uint32 | FC sample time, mapped by custom-link time sync |
+| `flags`, `origin_id` | uint16 each | validity bits; increments at every ARM |
+| `position_cm[3]` | int32 | ARM-relative East, North, Up |
+| `velocity_cms[3]` | int16 | ENU cm/s |
+| `attitude_cdeg[3]` | int16 | same FLU attitude / North yaw as 0x10 |
+| `gyro_dps_x10[3]` | int16 | FLU angular velocity, 0.1 deg/s |
+| `position_variance[3]` | float32 | ENU diagonal, m2 |
+| `velocity_variance[3]` | float32 | ENU diagonal, (m/s)2 |
+| `arm_yaw_cdeg` | int16 | yaw captured at ARM, 0.01 deg CCW from North |
+
+Flags `0x01/0x02/0x04/0x08` mean GPS 3D FIX / ARM origin / valid estimate /
+armed. The bridge requires all four and rejects malformed payloads/covariance.
+The stream adds about 7.1 kB/s to the custom-link downlink.
+
+Validation (ports 5761/5763 must be free; uses an isolated EEPROM and synthetic
+custom-link IMU/GPS/RC input, without flying UE or changing the real EEPROM):
+
+```bash
+# In the Betaflight checkout:
+make TARGET=SITL
+make EXTRA_FLAGS=-Werror test_custom_link_unittest test_position_estimator_unittest
+# In this package, with the rebuilt ROS workspace sourced:
+python3 test/sitl_odometry_test.py --binary /path/to/betaflight_SITL.elf
+ros2 topic echo /fpv/odom --qos-reliability best_effort
+```
+
+The regression measures wire and ROS rates against 100 Hz (+/-5%), checks
+ARM-heading pose/FLU twist transformations and covariance, GPS loss/recovery,
+position/heading reset at re-arm, and
+GPS acquisition only after ARM. SITL TCP output is drained only by the dyad
+worker to avoid cross-thread stream-buffer corruption at the added data rate.
+
+AirSim's synthetic magnetometer models 2 degrees east declination: calibrate the
+simulation EEPROM with `mag_declination=20` (0.1 degree units). Otherwise the
+heading frame is about 2 degrees away from true GPS ENU, creating an apparent
+cross-axis displacement proportional to forward distance. This is not a
+hardware compass preset. See the Betaflight checkout's
+`src/test/sitl/airsim_compass.cfg` and `airsim_odom_hold_test.py` for native
+POS HOLD/ALT HOLD truth-versus-odometry validation.
+
 ## Motor calibration
 
 The analytic reference for the 2 kg F70/HQ7040 simulation is:

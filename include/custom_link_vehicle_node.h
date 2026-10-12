@@ -12,6 +12,7 @@
 #include <mavros_msgs/msg/gpsraw.hpp>
 #include <mavros_msgs/msg/rc_in.hpp>
 #include <mavros_msgs/msg/state.hpp>
+#include <nav_msgs/msg/odometry.hpp>
 #include <sensor_msgs/msg/battery_state.hpp>
 #include <sensor_msgs/msg/fluid_pressure.hpp>
 #include <sensor_msgs/msg/imu.hpp>
@@ -41,7 +42,7 @@ namespace custom_link_bridge
     /// 与 msp_bridge::MspVehicleNode (已移除) 对外接口完全一致：话题名、消息
     /// 类型、控制量语义、RC 触发逻辑不变，下游 (drone_interceptor /
     /// airsim_tracker) 无需改动。链路升级为固件侧专用二进制协议：
-    ///   - 遥测 200/100/10 Hz 三条流，带 FC 时间戳，四时间戳软同步换算
+    ///   - 遥测 200/100/10 Hz 与 GPS 有效时的 100 Hz 里程计，带 FC 时间戳，四时间戳软同步换算
     ///     到主机时基（取代 MSP 的事务中点估计）
     ///   - 控制直发角速度 + 油门 (0x20)，取代 MSP_SET_RAW_RC 摇杆量映射
     ///
@@ -79,6 +80,7 @@ namespace custom_link_bridge
 
         // ---- ROS 接口 ----
         rclcpp::Publisher<sensor_msgs::msg::Imu>::SharedPtr imu_pub;
+        rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odom_pub;
         rclcpp::Publisher<mavros_msgs::msg::RCIn>::SharedPtr rc_in_pub;
         rclcpp::Publisher<mavros_msgs::msg::State>::SharedPtr state_pub;
         rclcpp::Publisher<mavros_msgs::msg::ExtendedState>::SharedPtr ext_state_pub;
@@ -119,6 +121,7 @@ namespace custom_link_bridge
         void handleFast(const custom_link::protocol::PayloadFast &p, int64_t hostUs);
         void handleMedium(const custom_link::protocol::PayloadMedium &p, int64_t hostUs);
         void handleSlow(const custom_link::protocol::PayloadSlow &p, int64_t hostUs);
+        void handleOdometry(const custom_link::protocol::PayloadOdometry &p, int64_t hostUs);
         void publishImu(int64_t hostUs);
         void publishState(uint32_t mode_flags, bool armed);
 
@@ -179,7 +182,7 @@ namespace custom_link_bridge
         std::atomic_bool in_hover{false};
         std::atomic_bool use_rate{false};
         std::atomic_bool rc_manual{true};
-        std::atomic<double> current_heading{0.0};
+        std::atomic<double> current_heading{0.0}; // ENU yaw [rad], CCW-positive, zero East (not compass bearing).
 
         apm_bridge::EMAFilter<double, 1> ema{50};
         std::unique_ptr<xfrobot::GimbalControl> gimbal;

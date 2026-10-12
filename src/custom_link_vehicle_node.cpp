@@ -172,6 +172,8 @@ CustomLinkVehicleNode::CustomLinkVehicleNode()
     // ---------------- ROS 接口 ----------------
     imu_pub = this->create_publisher<sensor_msgs::msg::Imu>(
         "/mavros/imu/data", rclcpp::QoS(rclcpp::KeepLast(10)).best_effort());
+    odom_pub = this->create_publisher<nav_msgs::msg::Odometry>(
+        "/fpv/odom", rclcpp::QoS(rclcpp::KeepLast(10)).best_effort());
     rc_in_pub = this->create_publisher<mavros_msgs::msg::RCIn>(
         "/mavros/rc/in", rclcpp::QoS(rclcpp::KeepLast(10)).best_effort());
     state_pub = this->create_publisher<mavros_msgs::msg::State>("/mavros/state", 10);
@@ -334,6 +336,16 @@ CustomLinkVehicleNode::CustomLinkVehicleNode()
                     handleSlow(p, hostUs);
                 break;
             }
+            case MSG_FC_ODOMETRY:
+            {
+                PayloadOdometry p;
+                if (frame.as(p))
+                    handleOdometry(p, hostUs);
+                else
+                    RCLCPP_ERROR_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                                         "Invalid custom-link odometry payload size: %u", frame.len);
+                break;
+            }
             default:
                 break;
             }
@@ -354,12 +366,13 @@ CustomLinkVehicleNode::CustomLinkVehicleNode()
                 return;
             RCLCPP_INFO(this->get_logger(),
                         "Custom link: rtt %.2f ms (jitter %.2f), skew %+.0f ppm, FC offset %+.2f ms, "
-                        "rx %lu (F:%u M:%u S:%u), tx %lu, reconnects %lu",
+                        "rx %lu (F:%u M:%u S:%u O:%u), tx %lu, reconnects %lu",
                         sync.rtt_ms, sync.jitter_ms, sync.skew_ppm, sync.offset_ms,
                         static_cast<unsigned long>(stats.rx_frames),
                         stats.rx_per_msg[custom_link::protocol::MSG_FC_FAST & 7u],
                         stats.rx_per_msg[custom_link::protocol::MSG_FC_MEDIUM & 7u],
                         stats.rx_per_msg[custom_link::protocol::MSG_FC_SLOW & 7u],
+                        stats.rx_per_msg[custom_link::protocol::MSG_FC_ODOMETRY & 7u],
                         static_cast<unsigned long>(stats.tx_frames),
                         static_cast<unsigned long>(stats.reconnects));
         });
@@ -653,6 +666,76 @@ void CustomLinkVehicleNode::handleSlow(const custom_link::protocol::PayloadSlow 
     std_msgs::msg::Bool failsafe;
     failsafe.data = (p.status & custom_link::protocol::STATUS_FAILSAFE) != 0;
     failsafe_pub->publish(std::move(failsafe));
+}
+
+void CustomLinkVehicleNode::handleOdometry(const custom_link::protocol::PayloadOdometry &p, int64_t hostUs)
+{
+    if ((p.flags & custom_link::protocol::ODOM_VALID_FLAGS) != custom_link::protocol::ODOM_VALID_FLAGS)
+    {
+        RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                             "Ignoring odometry without GPS 3D fix, ARM origin or valid armed estimate");
+        return;
+    }
+    if (p.arm_yaw_cdeg < -18000 || p.arm_yaw_cdeg > 18000)
+    {
+        RCLCPP_ERROR_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                             "Ignoring odometry with invalid ARM heading");
+        return;
+    }
+    for (int axis = 0; axis < 3; ++axis)
+    {
+        if (!std::isfinite(p.position_variance[axis]) || p.position_variance[axis] < 0.0f ||
+            !std::isfinite(p.velocity_variance[axis]) || p.velocity_variance[axis] < 0.0f)
+        {
+            RCLCPP_ERROR_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                                 "Ignoring odometry with invalid covariance");
+            return;
+        }
+    }
+    nav_msgs::msg::Odometry msg;
+    msg.header.stamp = rclcpp::Time(hostUs * 1000, RCL_ROS_TIME);
+    msg.header.frame_id = "odom";
+    msg.child_frame_id = imu_frame_id;
+    const tf2::Quaternion arm_heading(tf2::Vector3(0, 0, 1),
+        normalizeAngle(p.arm_yaw_cdeg * 0.01 * kDegToRad + M_PI_2));
+    const tf2::Matrix3x3 world_to_odom(arm_heading.inverse());
+    const tf2::Vector3 position = world_to_odom *
+        tf2::Vector3(p.position_cm[0] * 0.01, p.position_cm[1] * 0.01, p.position_cm[2] * 0.01);
+    msg.pose.pose.position.x = position.x();
+    msg.pose.pose.position.y = position.y();
+    msg.pose.pose.position.z = position.z();
+    tf2::Quaternion q;
+    q.setRPY(p.attitude_cdeg[0] * 0.01 * kDegToRad,
+             p.attitude_cdeg[1] * 0.01 * kDegToRad,
+             normalizeAngle(p.attitude_cdeg[2] * 0.01 * kDegToRad + M_PI_2));
+    msg.pose.pose.orientation = tf2::toMsg(arm_heading.inverse() * q);
+    // Twist stays in body FLU; only the pose frame changes from ENU to ARM heading.
+    const tf2::Matrix3x3 world_to_body(q.inverse());
+    const tf2::Vector3 velocity = world_to_body *
+        tf2::Vector3(p.velocity_cms[0] * 0.01, p.velocity_cms[1] * 0.01, p.velocity_cms[2] * 0.01);
+    msg.twist.twist.linear.x = velocity.x();
+    msg.twist.twist.linear.y = velocity.y();
+    msg.twist.twist.linear.z = velocity.z();
+    msg.twist.twist.angular.x = p.gyro_dps_x10[0] * 0.1 * kDegToRad;
+    msg.twist.twist.angular.y = p.gyro_dps_x10[1] * 0.1 * kDegToRad;
+    msg.twist.twist.angular.z = p.gyro_dps_x10[2] * 0.1 * kDegToRad;
+    for (int row = 0; row < 3; ++row)
+    {
+        // Conservative uncertainty when IMU covariance is not configured (zero means unknown).
+        msg.pose.covariance[(row + 3) * 6 + row + 3] = orientation_variance > 0 ? orientation_variance : M_PI * M_PI;
+        msg.twist.covariance[(row + 3) * 6 + row + 3] = angular_velocity_variance > 0 ? angular_velocity_variance : 1.0e6;
+        for (int col = 0; col < 3; ++col)
+        {
+            for (int axis = 0; axis < 3; ++axis)
+            {
+                msg.pose.covariance[row * 6 + col] += world_to_odom[row][axis] *
+                    p.position_variance[axis] * world_to_odom[col][axis];
+                msg.twist.covariance[row * 6 + col] += world_to_body[row][axis] *
+                    p.velocity_variance[axis] * world_to_body[col][axis];
+            }
+        }
+    }
+    odom_pub->publish(msg);
 }
 
 void CustomLinkVehicleNode::publishState(uint32_t mode_flags, bool is_armed)

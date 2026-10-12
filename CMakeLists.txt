@@ -19,6 +19,7 @@ find_package(tf2_ros REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
 find_package(quadrotor_msgs REQUIRED)
 find_package(mavros_msgs REQUIRED)
+find_package(nav_msgs REQUIRED)
 
 include_directories(include)
 
@@ -54,6 +55,7 @@ target_link_libraries(custom_link_bridge_node
   sensor_msgs::sensor_msgs
   quadrotor_msgs::quadrotor_msgs
   mavros_msgs::mavros_msgs
+  nav_msgs::nav_msgs
 )
 
 target_link_libraries(custom_link_bridge_node xfgimbal)

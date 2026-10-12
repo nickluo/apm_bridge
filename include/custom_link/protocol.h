@@ -28,6 +28,7 @@ namespace custom_link
             MSG_FC_FAST = 0x10,        // 200 Hz gyro/acc/attitude
             MSG_FC_MEDIUM = 0x11,      // 100 Hz baro/temp/rc
             MSG_FC_SLOW = 0x12,        // 10 Hz battery/gps/modes/status
+            MSG_FC_ODOMETRY = 0x14,    // 100 Hz GPS-valid ARM-relative ENU odometry
             MSG_HOST_CONTROL = 0x20,   // host -> FC control setpoints
             MSG_HOST_TIMESYNC = 0x30,  // host -> FC time sync request (u64 T1)
             MSG_FC_TIMESYNC = 0x31,    // FC -> host time sync response
@@ -37,11 +38,11 @@ namespace custom_link
         struct PayloadFast
         {
             uint32_t ts_us;            // FC micros() 时间戳
-            int16_t gyro[3];           // 0.1 deg/s (BF 体轴: x前 y右 z上)
+            int16_t gyro[3];           // 0.1 deg/s, body FLU: x forward, y left, z up
             int16_t acc[3];            // 1 mg
             int16_t attitude[3];       // roll/pitch/yaw, 0.01 deg，固件原生欧拉角，
-                                       // 即 FLU 右手系 (REP-103)：roll 左滚为正、
-                                       // pitch 抬头为负；yaw 为右手数学角（绕 +Z
+                                       // 即 FLU 右手系 (REP-103)：roll 右滚为正、
+                                       // pitch 低头为正；yaw 为右手数学角（绕 +Z
                                        // 逆时针为正，0=磁北，±180° 折返）
         };
 
@@ -82,6 +83,20 @@ namespace custom_link
             int16_t rate_x10[3];       // 0.1 deg/s (BF 体轴)
         };
 
+        struct PayloadOdometry
+        {
+            uint32_t ts_us;
+            uint16_t flags;
+            uint16_t origin_id;
+            int32_t position_cm[3];     // ENU, ARM origin
+            int16_t velocity_cms[3];    // ENU
+            int16_t attitude_cdeg[3];   // same FLU/North-yaw convention as 0x10
+            int16_t gyro_dps_x10[3];    // FLU body
+            float position_variance[3]; // m^2, ENU diagonal
+            float velocity_variance[3]; // (m/s)^2, ENU diagonal
+            int16_t arm_yaw_cdeg;       // ARM yaw, same North-yaw convention as attitude_cdeg
+        };
+
         struct PayloadTimesyncReq
         {
             uint64_t t1;
@@ -99,11 +114,18 @@ namespace custom_link
         static_assert(sizeof(PayloadMedium) == 46, "medium payload size");
         static_assert(sizeof(PayloadSlow) == 36, "slow payload size");
         static_assert(sizeof(PayloadControl) == 20, "control payload size");
+        static_assert(sizeof(PayloadOdometry) == 64, "odometry payload size");
         static_assert(sizeof(PayloadTimesyncReq) == 8, "timesync req size");
         static_assert(sizeof(PayloadTimesyncResp) == 16, "timesync resp size");
 
         constexpr uint16_t STATUS_ARMED = 0x0001;
         constexpr uint16_t STATUS_FAILSAFE = 0x0002;
+        constexpr uint16_t ODOM_GPS_3D_FIX = 0x0001;
+        constexpr uint16_t ODOM_ARM_ORIGIN = 0x0002;
+        constexpr uint16_t ODOM_ESTIMATE_VALID = 0x0004;
+        constexpr uint16_t ODOM_ARMED = 0x0008;
+        constexpr uint16_t ODOM_VALID_FLAGS = ODOM_GPS_3D_FIX | ODOM_ARM_ORIGIN |
+            ODOM_ESTIMATE_VALID | ODOM_ARMED;
 
         // flightModeFlags 位（与固件 runtime_config.h 一致）
         namespace mode

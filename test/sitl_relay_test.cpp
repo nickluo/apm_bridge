@@ -241,7 +241,7 @@ int main()
             relay.read(buffer.data(), buffer.size(), std::chrono::milliseconds(5));
             require(receive(fc.get(), input.size()) == input, "simulation input");
         }
-        for (const uint8_t id : {0x10, 0x11, 0x12, 0x13, 0x31})
+        for (const uint8_t id : {0x10, 0x11, 0x12, 0x13, 0x14, 0x31})
         {
             const auto output = frame(id);
             send(fc.get(), output);
