@@ -92,12 +92,14 @@ class Observer(Node):
         super().__init__("sitl_odometry_test")
         self.state, self.gps = None, None
         self.imu = None
+        self.gimbal = None
         self.state_transitions = []
         self.odometry = []
         self.create_subscription(State, "/mavros/state", self.on_state, 10)
         self.create_subscription(GPSRAW, "/mavros/gpsstatus/gpsraw", self.on_gps, qos_profile_sensor_data)
         self.create_subscription(Odometry, "/fpv/odom", self.on_odometry, qos_profile_sensor_data)
         self.create_subscription(Imu, "/mavros/imu/data", self.on_imu, qos_profile_sensor_data)
+        self.create_subscription(Imu, "/fpv/gimbal", self.on_gimbal, 10)
         self.arm = self.create_publisher(Bool, "/fpv/arm", 10)
         self.command = self.create_publisher(ControlCommand, "/fpv/control_command_raw",
                                              qos_profile_sensor_data)
@@ -115,6 +117,9 @@ class Observer(Node):
 
     def on_imu(self, message):
         self.imu = message
+
+    def on_gimbal(self, message):
+        self.gimbal = message
 
 
 class Simulation:
@@ -224,6 +229,7 @@ def decoder_test(output):
         process = subprocess.Popen([
             str(Path(get_package_prefix("apm_bridge")) / "lib/apm_bridge/custom_link_bridge_node"), "--ros-args",
             "-p", "link.transport:=tcp", "-p", f"link.tcp_port:={port}", "-p", "gimbal_port:=''",
+            "-p", "gimbal.pitch_hold:=-20.0",
         ], stdout=(output / "decoder.log").open("w"), stderr=subprocess.STDOUT)
         connection = server.accept()[0]
         deadline = time.monotonic() + 5
@@ -264,6 +270,20 @@ def decoder_test(output):
             expected = math.radians(enu_deg)
             assert abs(math.atan2(math.sin(actual - expected), math.cos(actual - expected))) < 1e-6
             assert math.isclose(node.imu.angular_velocity.z, math.radians(10), abs_tol=1e-6)
+            assert node.gimbal is not None
+            camera = node.gimbal
+            cq = camera.orientation
+            forward = (1 - 2 * (cq.y ** 2 + cq.z ** 2),
+                       2 * (cq.x * cq.y + cq.w * cq.z),
+                       2 * (cq.x * cq.z - cq.w * cq.y))
+            for value, wanted in zip(forward, (math.cos(expected) * math.cos(math.pi / 9),
+                                               math.sin(expected) * math.cos(math.pi / 9), math.sin(math.pi / 9))):
+                assert math.isclose(value, wanted, abs_tol=1e-6)
+            assert camera.header.stamp == node.imu.header.stamp
+            assert math.isclose(camera.angular_velocity.x, math.sin(math.pi / 9) * math.radians(10), abs_tol=1e-6)
+            assert math.isclose(camera.angular_velocity.z, math.cos(math.pi / 9) * math.radians(10), abs_tol=1e-6)
+            assert camera.linear_acceleration_covariance[0] == -1
+        print("PASS: actual node selects strapdown for empty hardware port and publishes fixed-pitch camera FLU pose/rates", flush=True)
         for direction in (1, -1):
             previous = None
             for degrees in (0, 10, 20, 30):

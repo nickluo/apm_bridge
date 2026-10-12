@@ -4,17 +4,18 @@
 #include <memory>
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/imu.hpp>
+#include "gimbal_interface.h"
 
 namespace custom_link_bridge
 {
-    class AirsimGimbal
+    class AirsimGimbal : public apm_bridge::Gimbal
     {
     public:
-        using Callback = std::function<void(sensor_msgs::msg::Imu::UniquePtr)>;
         AirsimGimbal(rclcpp::Node &node, Callback callback);
-        ~AirsimGimbal();
-        void start();
-        void stop();
+        ~AirsimGimbal() override;
+        void start() override;
+        void stop() override;
+        void updateVehicleState(const sensor_msgs::msg::Imu &imu, double gravity) override;
 
     private:
         class Impl;

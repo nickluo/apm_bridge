@@ -35,6 +35,7 @@ target_link_libraries(xfgimbal
   tf2::tf2
   tf2_ros::tf2_ros
   sensor_msgs::sensor_msgs
+  tf2_geometry_msgs::tf2_geometry_msgs
 )
 
 # Betaflight custom-link bridge: 与定制化 Betaflight 固件的专用二进制链路
@@ -42,6 +43,8 @@ target_link_libraries(xfgimbal
 add_executable(custom_link_bridge_node
   src/custom_link_vehicle_node.cpp
   src/airsim_gimbal.cpp
+  src/gimbal_factory.cpp
+  src/strapdown_gimbal.cpp
   src/custom_link/sitl_transport.cpp
   src/custom_link/client.cpp
   src/custom_link/transport.cpp
@@ -111,6 +114,15 @@ if(BUILD_TESTING)
   target_link_libraries(sitl_relay_test xfgimbal rclcpp::rclcpp)
   add_test(NAME sitl_relay_test COMMAND sitl_relay_test)
   set_tests_properties(sitl_relay_test PROPERTIES TIMEOUT 10)
+  add_executable(gimbal_interface_test
+    test/gimbal_interface_test.cpp src/gimbal_factory.cpp src/airsim_gimbal.cpp src/strapdown_gimbal.cpp)
+  target_link_libraries(gimbal_interface_test xfgimbal rclcpp::rclcpp tf2_geometry_msgs::tf2_geometry_msgs)
+  if(APM_BRIDGE_AIRSIM)
+    target_compile_definitions(gimbal_interface_test PRIVATE APM_BRIDGE_AIRSIM)
+    target_link_libraries(gimbal_interface_test rpc)
+  endif()
+  add_test(NAME gimbal_interface_test COMMAND gimbal_interface_test)
+  set_tests_properties(gimbal_interface_test PROPERTIES TIMEOUT 15)
 endif()
 
 ament_package()

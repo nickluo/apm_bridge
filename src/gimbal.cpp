@@ -1,4 +1,6 @@
 #include "gimbal.h"
+#include <tf2/LinearMath/Matrix3x3.hpp>
+#include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 
 #include <rclcpp/rclcpp.hpp>
 
@@ -169,8 +171,49 @@ GimbalControl::GimbalControl(const std::string &port, const GimbalConfig &gimbal
 /**
  * @brief 析构函数
  */
+GimbalControl::GimbalControl(rclcpp::Node &ros_node, const std::string &port,
+                            const GimbalConfig &gimbal_cfg, Callback callback)
+    : GimbalControl(port, gimbal_cfg)
+{
+    if (!callback)
+        throw std::invalid_argument("Gimbal orientation callback is required");
+    node = &ros_node;
+    orientation_callback = std::move(callback);
+    const auto logger = ros_node.get_logger();
+    const auto clock = ros_node.get_clock();
+    setStatusCallback([logger, clock, last_stat = uint8_t{0}, last_tca = false](const GimbalStatus &s) mutable {
+        if (s.hw_err != 0)
+            RCLCPP_ERROR_THROTTLE(logger, *clock, 5000, "Gimbal hardware error: 0x%02X (需返厂检修)", s.hw_err);
+        if (s.gbc_stat != last_stat)
+        {
+            last_stat = s.gbc_stat;
+            static const char *names[] = {"UNDEFINED", "INIT", "STOPPED", "PROTECTION", "MANUAL", "POINT_SHIFT"};
+            if (s.gbc_stat == 3)
+                RCLCPP_ERROR(logger, "Gimbal entered PROTECTION state (倾角保护触发, 云台不可控)");
+            else
+                RCLCPP_INFO(logger, "Gimbal state -> %s", names[s.gbc_stat < 6 ? s.gbc_stat : 0]);
+        }
+        if (s.tca_ready != last_tca)
+        {
+            last_tca = s.tca_ready;
+            if (s.tca_ready)
+                RCLCPP_INFO(logger, "Gimbal temperature control ready (可校准陀螺仪)");
+        }
+    });
+}
+
 GimbalControl::~GimbalControl()
 {
+    stop();
+}
+
+void GimbalControl::stop()
+{
+    if (orientation_timer)
+    {
+        orientation_timer->cancel();
+        orientation_timer.reset();
+    }
     if (work_thread.joinable())
     {
         running = false;
@@ -178,6 +221,89 @@ GimbalControl::~GimbalControl()
     }
     start_stop(false); // 停止云台
     close();
+}
+
+void GimbalControl::start()
+{
+    if (running.load())
+        return;
+    if (!open())
+    {
+        RCLCPP_ERROR(node ? node->get_logger() : rclcpp::get_logger("xfrobot_gimbal"),
+                     "Failed to open gimbal serial port: %s", port_name.c_str());
+        return;
+    }
+    run();
+    if (node)
+    {
+        orientation_timer = node->create_wall_timer(std::chrono::milliseconds(10), [this]() {
+            if (!is_running())
+                return;
+            auto msg = getOrientationFLU();
+            if (!msg)
+                return;
+            tf2::Quaternion q;
+            tf2::fromMsg(msg->orientation, q);
+            const tf2::Quaternion heading(tf2::Vector3(0, 0, 1), vehicle_heading.load());
+            msg->orientation = tf2::toMsg(heading * q);
+            msg->header.frame_id = "base_link";
+            orientation_callback(std::move(msg));
+        });
+        RCLCPP_INFO(node->get_logger(),
+                    "Gimbal enabled on %s (model index %d, axes R/P/Y: %d/%d/%d, uav_fusion: %s)",
+                    port_name.c_str(), static_cast<int>(cfg.model),
+                    cfg.roll.present ? 1 : 0, cfg.pitch.present ? 1 : 0, cfg.yaw.present ? 1 : 0,
+                    cfg.send_uav_data ? "on" : "off");
+    }
+}
+
+void GimbalControl::updateVehicleState(const sensor_msgs::msg::Imu &imu, double gravity)
+{
+    tf2::Quaternion q;
+    tf2::fromMsg(imu.orientation, q);
+    if (!std::isfinite(q.length2()) || q.length2() < 1e-12)
+    {
+        RCLCPP_ERROR(node ? node->get_logger() : rclcpp::get_logger("xfrobot_gimbal"),
+                     "Ignoring invalid vehicle orientation for gimbal");
+        if (cfg.send_uav_data)
+        {
+            const int16_t invalid[3] = {};
+            setUavData(false, invalid, invalid);
+        }
+        return;
+    }
+    q.normalize();
+    double roll, pitch, yaw;
+    tf2::Matrix3x3(q).getRPY(roll, pitch, yaw);
+    vehicle_heading.store(yaw);
+    if (!cfg.send_uav_data)
+        return;
+    const auto &a = imu.linear_acceleration;
+    if (!std::isfinite(gravity) || gravity <= 0 ||
+        !std::isfinite(a.x) || !std::isfinite(a.y) || !std::isfinite(a.z))
+    {
+        RCLCPP_ERROR(node ? node->get_logger() : rclcpp::get_logger("xfrobot_gimbal"),
+                     "Ignoring invalid vehicle acceleration/gravity for gimbal fusion");
+        const int16_t invalid[3] = {};
+        setUavData(false, invalid, invalid);
+        return;
+    }
+    const auto encode = [](double value) {
+        return static_cast<int16_t>(std::clamp(std::round(value), -32767.0, 32767.0));
+    };
+    double north_heading = M_PI_2 - yaw;
+    while (north_heading > M_PI)
+        north_heading -= 2 * M_PI;
+    while (north_heading <= -M_PI)
+        north_heading += 2 * M_PI;
+    const double cdeg = 18000.0 / M_PI;
+    const int16_t angle[3] = {encode(roll * cdeg), encode(-pitch * cdeg), encode(north_heading * cdeg)};
+    const auto world = tf2::quatRotate(q, tf2::Vector3(a.x, a.y, a.z)) + tf2::Vector3(0, 0, -gravity);
+    const auto encodeAcceleration = [](double value) {
+        return static_cast<int16_t>(std::clamp(value * 100, -32767.0, 32767.0));
+    };
+    const int16_t acceleration[3] = {encodeAcceleration(world.y()), encodeAcceleration(world.x()), encodeAcceleration(world.z())};
+    setUavData(true, angle, acceleration);
 }
 
 void GimbalControl::run()

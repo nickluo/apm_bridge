@@ -14,6 +14,7 @@
 
 #include "serial/serial.h"
 #include "ema_filter.h"
+#include "gimbal_interface.h"
 
 
 namespace xfrobot
@@ -153,7 +154,7 @@ struct GimbalConfig
     // 单轴无法维持水平且可能触发倾角保护): 切换锁定+真实角速度控制,
     // op_value=0 锁定当前俯仰角;
     // |滚转| < roll_hold_exit 后恢复角度控制 (可将 exit 设小于 enter 构成迟滞)
-    float pitch_hold_deg = 0.0f;
+    float pitch_hold_deg = 0.0f; // C-20S protocol angle: positive nose-up; preserve existing hardware convention.
     float roll_hold_enter_deg = 75.0f;
     float roll_hold_exit_deg = 75.0f;
 
@@ -196,7 +197,7 @@ struct GimbalStatus
     bool rx_ok = false;     // 是否收到过有效返回包
 };
 
-class GimbalControl
+class GimbalControl : public apm_bridge::Gimbal
 {
 public:
     /**
@@ -210,9 +211,13 @@ public:
      * @param cfg 云台机型配置
      */
     GimbalControl(const std::string &port, const GimbalConfig &cfg);
-    ~GimbalControl();
+    GimbalControl(rclcpp::Node &node, const std::string &port, const GimbalConfig &cfg, Callback callback);
+    ~GimbalControl() override;
 
     void run();
+    void start() override;
+    void stop() override;
+    void updateVehicleState(const sensor_msgs::msg::Imu &imu, double gravity) override;
 
     bool is_running() const;
 
@@ -270,6 +275,10 @@ public:
     void setUavData(bool valid, const int16_t angle_cdeg[3], const int16_t accel_cms2[3]);
 
 private:
+    rclcpp::Node *node = nullptr;
+    Callback orientation_callback;
+    rclcpp::TimerBase::SharedPtr orientation_timer;
+    std::atomic<double> vehicle_heading{0.0};
     std::string port_name;
     serial::Serial serial_port;
     bool is_open;

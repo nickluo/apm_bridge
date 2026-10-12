@@ -53,10 +53,13 @@ custom_link_bridge:
     landed:
       airborne_altitude: 0.5
 
-    # 留空则不启用云台线程。
+    # 留空使用固定俯仰角的捷联相机；非空使用 XFrobot 串口云台。
     gimbal_port: "/dev/ttyS10"
 
     gimbal:
+      # 共用俯仰角 (deg)：捷联时相对机身固定；C-20S 增稳时以锁定+角度控制保持期望角。
+      # 方向保持各后端原约定：捷联 FLU 正值低头/负值抬头；增稳按云台协议角度。
+      pitch_hold: 0.0
       # 云台机型: C20S (单轴) / C40D (卧式两轴) / C200T (三轴)，决定参与控制的轴。
       # 行程限位默认沿用三轴机现场调参数值，手册正文未给数值 (在图纸)，
       # 换机型后务必按图纸实测并用下列参数覆盖。
@@ -72,7 +75,6 @@ custom_link_bridge:
       # 常态: 锁定+角度控制保持期望俯仰角 (0=水平);
       # |IMU滚转角| > roll_hold_enter (大坡度/倒飞): 锁定+零速保持当前俯仰角,
       # 回落到 roll_hold_exit 以下恢复角度控制 (exit 设小于 enter 可构成迟滞)。
-      pitch_hold: 0.0
       roll_hold_enter: 75.0
       roll_hold_exit: 70.0
       # 载机惯导数据融合 (提升机动飞行时的云台角度精度)。

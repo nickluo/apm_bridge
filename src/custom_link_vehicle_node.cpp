@@ -50,7 +50,6 @@ CustomLinkVehicleNode::CustomLinkVehicleNode()
     this->declare_parameter<double>("motor_parameters.spin_k", 0.0);
     this->declare_parameter<double>("motor_parameters.vbat_a", 0.0);
     this->declare_parameter<double>("motor_parameters.vbat_b", 1.0);
-    this->declare_parameter<std::string>("gimbal_port", "");
     airsim_enabled = this->declare_parameter<bool>("airsim.enabled", false);
 
     this->declare_parameter<std::string>("link.transport", "serial"); // serial | tcp
@@ -129,46 +128,6 @@ CustomLinkVehicleNode::CustomLinkVehicleNode()
         RCLCPP_WARN(this->get_logger(),
                     "Thrust inverse fit failed (degenerate samples?), thrustToForce falls back to Newton iteration");
 
-    // ---------------- 云台 (可选, 支持 C-20S/C-40D/C-200T) ----------------
-    std::string gimbal_port;
-    this->get_parameter("gimbal_port", gimbal_port);
-    if (airsim_enabled && !gimbal_port.empty())
-        throw std::invalid_argument("AirSim SITL requires an empty gimbal_port");
-    if (!gimbal_port.empty())
-    {
-        xfrobot::GimbalConfig gimbal_cfg = xfrobot::GimbalConfig::fromParameters(*this);
-        gimbal_uav_fusion = gimbal_cfg.send_uav_data;
-        gimbal = std::make_unique<xfrobot::GimbalControl>(gimbal_port, gimbal_cfg);
-        gimbal->setStatusCallback([this](const xfrobot::GimbalStatus &s) {
-            if (s.hw_err != 0)
-                RCLCPP_ERROR_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
-                                      "Gimbal hardware error: 0x%02X (需返厂检修)", s.hw_err);
-            if (s.gbc_stat != gimbal_last_stat)
-            {
-                gimbal_last_stat = s.gbc_stat;
-                static const char *kStatNames[] = {"UNDEFINED", "INIT", "STOPPED",
-                                                   "PROTECTION", "MANUAL", "POINT_SHIFT"};
-                if (s.gbc_stat == 3) // 倾角保护: 云台回中且不可控
-                    RCLCPP_ERROR(this->get_logger(),
-                                 "Gimbal entered PROTECTION state (倾角保护触发, 云台不可控)");
-                else
-                    RCLCPP_INFO(this->get_logger(), "Gimbal state -> %s",
-                                kStatNames[s.gbc_stat < 6 ? s.gbc_stat : 0]);
-            }
-            if (s.tca_ready != gimbal_last_tca)
-            {
-                gimbal_last_tca = s.tca_ready;
-                if (s.tca_ready)
-                    RCLCPP_INFO(this->get_logger(), "Gimbal temperature control ready (可校准陀螺仪)");
-            }
-        });
-        gimbal->run();
-        RCLCPP_INFO(this->get_logger(), "Gimbal enabled on %s (model index %d, axes R/P/Y: %d/%d/%d, uav_fusion: %s)",
-                    gimbal_port.c_str(), static_cast<int>(gimbal_cfg.model),
-                    gimbal_cfg.roll.present ? 1 : 0, gimbal_cfg.pitch.present ? 1 : 0,
-                    gimbal_cfg.yaw.present ? 1 : 0, gimbal_uav_fusion ? "on" : "off");
-    }
-
     // ---------------- ROS 接口 ----------------
     imu_pub = this->create_publisher<sensor_msgs::msg::Imu>(
         "/mavros/imu/data", rclcpp::QoS(rclcpp::KeepLast(10)).best_effort());
@@ -225,26 +184,11 @@ CustomLinkVehicleNode::CustomLinkVehicleNode()
             in_mission = msg->data;
         });
 
+    gimbal = apm_bridge::createGimbal(*this, [publisher = gimbal_imu_pub](auto msg) {
+        publisher->publish(std::move(msg));
+    });
     if (gimbal)
-    {
-        gimbal_timer = this->create_wall_timer(std::chrono::milliseconds(10), [&]() {
-            if (!gimbal->is_running())
-                return;
-            auto imu_msg = gimbal->getOrientationFLU();
-            if (!imu_msg)
-                return;
-            tf2::Quaternion q(imu_msg->orientation.x, imu_msg->orientation.y,
-                              imu_msg->orientation.z, imu_msg->orientation.w);
-            tf2::Quaternion q_heading(tf2::Vector3(0, 0, 1), current_heading.load());
-            tf2::Quaternion q_final = q_heading * q;
-            imu_msg->orientation.x = q_final.x();
-            imu_msg->orientation.y = q_final.y();
-            imu_msg->orientation.z = q_final.z();
-            imu_msg->orientation.w = q_final.w();
-            imu_msg->header.frame_id = "base_link";
-            gimbal_imu_pub->publish(std::move(imu_msg));
-        });
-    }
+        gimbal->start();
 
     // ---------------- 链路 ----------------
     using custom_link::Client;
@@ -276,18 +220,6 @@ CustomLinkVehicleNode::CustomLinkVehicleNode()
             throw std::invalid_argument("AirSim relay and FC TCP ports must be valid and distinct");
         transport = std::make_unique<custom_link::SitlTransport>(
             tcp_host, static_cast<uint16_t>(tcp_port), bind_host, static_cast<uint16_t>(bind_port), this->get_logger());
-        if (this->declare_parameter<bool>("airsim.gimbal_enabled", true))
-        {
-            airsim_gimbal = std::make_unique<AirsimGimbal>(*this, [this](auto msg) {
-                const tf2::Quaternion q(msg->orientation.x, msg->orientation.y,
-                                        msg->orientation.z, msg->orientation.w);
-                const tf2::Quaternion heading(tf2::Vector3(0, 0, 1), current_heading.load());
-                tf2::Matrix3x3(heading.inverse() * q).getRPY(msg->orientation_covariance[0],
-                    msg->orientation_covariance[1], msg->orientation_covariance[2]);
-                gimbal_imu_pub->publish(std::move(msg));
-            });
-            airsim_gimbal->start();
-        }
     }
     else if (transport_kind == "tcp")
     {
@@ -377,15 +309,12 @@ CustomLinkVehicleNode::CustomLinkVehicleNode()
                         static_cast<unsigned long>(stats.reconnects));
         });
 
-    rclcpp::on_shutdown([&]() {
-        gimbal.reset();
-    });
 }
 
 CustomLinkVehicleNode::~CustomLinkVehicleNode()
 {
-    if (airsim_gimbal)
-        airsim_gimbal->stop();
+    if (gimbal)
+        gimbal->stop();
     if (client)
         client->stop();
 }
@@ -423,35 +352,6 @@ void CustomLinkVehicleNode::handleFast(const custom_link::protocol::PayloadFast 
         yaw_enu = normalizeAngle(p.attitude[2] * 0.01 * kDegToRad + M_PI_2);
         att_valid = true;
     }
-    current_heading.store(yaw_enu);
-
-    // 云台载机惯导数据融合 (协议 V1.0.4, 默认关闭)。
-    // 云台载机系为 FRD: 滚转右滚为正、俯仰抬头为正、偏航顺时针为正。
-    // BF 姿态: roll 右滚正（直通）、pitch 低头正（取反）、yaw 逆时针数学角
-    //（取反得顺时针）。偏航为 BF 磁北/上电航向, 与云台世界系零位存在未
-    // 验证的偏移。加速度: 机体系(含重力)去重力后旋转到 NEU (协议要求大地系,
-    // 0.01m/s2)。
-    if (gimbal && gimbal_uav_fusion)
-    {
-        const int16_t angle_cdeg[3] = {
-            static_cast<int16_t>(p.attitude[0]),
-            static_cast<int16_t>(-p.attitude[1]),
-            static_cast<int16_t>(-p.attitude[2])};
-
-        tf2::Quaternion q_att;
-        q_att.setRPY(roll_flu, pitch_flu, yaw_enu);
-        const tf2::Vector3 a_flu(accel_flu[0], accel_flu[1], accel_flu[2]);
-        const tf2::Vector3 a_enu = tf2::quatRotate(q_att, a_flu) + tf2::Vector3(0.0, 0.0, -gravity);
-        const auto to_cms2 = [](double v) {
-            return static_cast<int16_t>(std::clamp(v * 100.0, -32767.0, 32767.0));
-        };
-        const int16_t accel_cms2[3] = {
-            to_cms2(a_enu.y()), // 北
-            to_cms2(a_enu.x()), // 东
-            to_cms2(a_enu.z())};// 天
-        gimbal->setUavData(true, angle_cdeg, accel_cms2);
-    }
-
     publishImu(hostUs);
 }
 
@@ -483,6 +383,8 @@ void CustomLinkVehicleNode::publishImu(int64_t hostUs)
     if (linear_acceleration_variance > 0.0)
         msg.linear_acceleration_covariance[0] = msg.linear_acceleration_covariance[4] =
             msg.linear_acceleration_covariance[8] = linear_acceleration_variance;
+    if (gimbal)
+        gimbal->updateVehicleState(msg, gravity);
     imu_pub->publish(msg);
 
     // 地面且未解锁时估计当地重力，逻辑同 apm_bridge::VehicleNode::imuCallback。

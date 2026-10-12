@@ -14,6 +14,7 @@
 #include <rpc/client.h>
 #include <rpc/rpc_error.h>
 #include <tf2/LinearMath/Quaternion.hpp>
+#include <tf2/LinearMath/Matrix3x3.hpp>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 
 namespace custom_link_bridge
@@ -23,6 +24,8 @@ namespace custom_link_bridge
     public:
         Impl(rclcpp::Node &node, Callback callback) : node_(node), callback_(std::move(callback))
         {
+            if (!callback_)
+                throw std::invalid_argument("Gimbal orientation callback is required");
             host_ = node_.declare_parameter<std::string>("airsim.host", "127.0.0.1");
             port_ = node_.declare_parameter<int>("airsim.port", 41451);
             vehicle_ = node_.declare_parameter<std::string>("airsim.vehicle_name", "Copter");
@@ -35,7 +38,8 @@ namespace custom_link_bridge
         ~Impl() { stop(); }
         void start()
         {
-            running_ = true;
+            if (running_.exchange(true))
+                return;
             thread_ = std::thread([this]() { run(); });
         }
         void stop()
@@ -44,6 +48,21 @@ namespace custom_link_bridge
             wake_.notify_all();
             if (thread_.joinable())
                 thread_.join();
+        }
+        void updateVehicleState(const sensor_msgs::msg::Imu &imu)
+        {
+            tf2::Quaternion q;
+            tf2::fromMsg(imu.orientation, q);
+            if (!std::isfinite(q.length2()) || q.length2() < 1e-12)
+            {
+                RCLCPP_ERROR_THROTTLE(node_.get_logger(), *node_.get_clock(), 2000,
+                                     "Ignoring invalid vehicle orientation for AirSim gimbal");
+                return;
+            }
+            q.normalize();
+            double roll, pitch, yaw;
+            tf2::Matrix3x3(q).getRPY(roll, pitch, yaw);
+            vehicle_heading_ = yaw;
         }
 
     private:
@@ -73,6 +92,9 @@ namespace custom_link_bridge
                     msg->header.stamp = node_.now();
                     msg->header.frame_id = "base_link";
                     msg->orientation = tf2::toMsg(enu);
+                    const tf2::Quaternion heading(tf2::Vector3(0, 0, 1), vehicle_heading_.load());
+                    tf2::Matrix3x3(heading.inverse() * enu).getRPY(msg->orientation_covariance[0],
+                        msg->orientation_covariance[1], msg->orientation_covariance[2]);
                     msg->angular_velocity_covariance[0] = -1;
                     msg->linear_acceleration_covariance[0] = -1;
                     const auto now = std::chrono::steady_clock::now();
@@ -123,6 +145,7 @@ namespace custom_link_bridge
         int port_;
         double timeout_;
         std::atomic_bool running_{false};
+        std::atomic<double> vehicle_heading_{0.0};
         std::thread thread_;
         std::mutex mutex_;
         std::condition_variable wake_;
@@ -133,6 +156,7 @@ namespace custom_link_bridge
     AirsimGimbal::~AirsimGimbal() = default;
     void AirsimGimbal::start() { impl_->start(); }
     void AirsimGimbal::stop() { impl_->stop(); }
+    void AirsimGimbal::updateVehicleState(const sensor_msgs::msg::Imu &imu, double) { impl_->updateVehicleState(imu); }
 }
 #else
 namespace custom_link_bridge
@@ -145,5 +169,6 @@ namespace custom_link_bridge
     AirsimGimbal::~AirsimGimbal() = default;
     void AirsimGimbal::start() {}
     void AirsimGimbal::stop() {}
+    void AirsimGimbal::updateVehicleState(const sensor_msgs::msg::Imu &, double) {}
 }
 #endif

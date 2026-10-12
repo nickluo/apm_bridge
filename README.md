@@ -66,6 +66,63 @@ selects the relay listener; `airsim_host`, `airsim_port`, `vehicle_name`,
 `camera_name` select the optional camera API. `gimbal_enabled` and `parameters`
 select the camera/configuration.
 
+## Gimbal abstraction
+
+`apm_bridge::Gimbal` defines the shared `start()`, `stop()` and
+`updateVehicleState(imu, gravity)` interface, with an orientation callback.
+`xfrobot::GimbalControl` implements the serial backend and
+`custom_link_bridge::AirsimGimbal` implements the camera RPC backend.
+`apm_bridge::StrapdownGimbal` implements a camera with a fixed body-relative pitch.
+`createGimbal` selects/configures the backend from the existing parameters.
+`CustomLinkVehicleNode` holds only `std::unique_ptr<Gimbal>` and publishes the
+callback message; it does not depend on concrete drivers, protocol status,
+fusion flags, polling timers or heading-composition details.
+
+The input is vehicle FLU-to-ENU orientation and body specific acceleration.
+All callbacks preserve camera FLU-to-ENU orientation, camera FLU rates and the
+legacy heading-relative Euler slots. Serial polling remains 100 Hz; AirSim
+camera polling remains approximately 50 Hz. Serial status logging and optional
+FRD/NEU UAV-data conversion live in the serial backend. Lifecycle stop is
+idempotent and cancels callbacks/joins workers before the node is destroyed.
+The hardware `run()`, `getOrientationFLU()` and command APIs remain available
+for existing standalone callers and protocol tests.
+
+Only an explicitly disabled AirSim gimbal returns no object. Invalid backend configuration or missing
+AirSim SDK is an explicit error; serial-open failures are logged without
+publishing success-shaped gimbal data.
+
+### Fixed-pitch strapdown camera
+
+When `airsim.enabled=false` and `gimbal_port=""`, the factory automatically
+selects `StrapdownGimbal`, rather than disabling camera orientation publication.
+Nonempty hardware ports still select XFrobot; AirSim selection is unchanged.
+
+Set the shared `gimbal.pitch_hold` at startup. For strapdown it is in **degrees FLU**: positive points below
+the body forward axis, negative points above it. Default is 0.0; the accepted
+range is [-180,180]. For example, a camera tilted 20 degrees upward:
+
+```bash
+ros2 launch apm_bridge custom_link.launch.py pitch_hold:=-20.0
+```
+
+The hardware launch defaults to an empty gimbal port. The equivalent parameters
+are `airsim.enabled: false`, `gimbal_port: ""`, and `gimbal.pitch_hold: -20.0`.
+For the C-20S stabilized gimbal, the same parameter retains its existing
+locked-angle hold meaning (relative to the stabilization reference, not the
+vehicle). Hardware protocol direction/control behavior is unchanged.
+The optional launch argument `pitch_hold` overrides this value only when set;
+otherwise the YAML value is preserved. `gimbal.fixed_pitch` / `fixed_pitch`
+have been removed; migrate them to `gimbal.pitch_hold` / `pitch_hold`.
+
+Orientation uses `q_camera_ENU = q_vehicle_ENU * q_camera_body`, not addition of
+Euler pitch angles. Body angular velocity/covariance are rotated into camera
+FLU. The callback preserves the vehicle IMU sample timestamp and the existing
+`/fpv/gimbal` frame/legacy-Euler contract. It publishes once per fresh vehicle
+IMU update (normally 200 Hz), with no serial port, RPC call or extra worker.
+Acceleration is marked unavailable because no camera accelerometer or
+translation/lever-arm model is specified. Stopping waits for any in-flight
+callback and prevents further publications until restarted.
+
 ## Preserved interfaces
 
 The existing `/fpv/control_command`, `/fpv/control_command_raw`, `/fpv/arm`,

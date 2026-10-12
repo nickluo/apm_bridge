@@ -32,8 +32,7 @@
 #include "custom_link/client.h"
 #include "quadratic_thrust_model.h"
 #include "ema_filter.h"
-#include "gimbal.h"
-#include "airsim_gimbal.h"
+#include "gimbal_interface.h"
 
 namespace custom_link_bridge
 {
@@ -104,7 +103,6 @@ namespace custom_link_bridge
         rclcpp::Subscription<std_msgs::msg::Int8>::SharedPtr radar_state_sub;
         rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr mission_state_sub;
 
-        rclcpp::TimerBase::SharedPtr gimbal_timer;
         rclcpp::TimerBase::SharedPtr diag_timer;
         rclcpp::TimerBase::SharedPtr cmd_push_timer;
 
@@ -145,7 +143,6 @@ namespace custom_link_bridge
         double rate_limit_dps = 0.0;      // 发送前角速度限幅, 0 = 不限制
 
         std::unique_ptr<custom_link::Client> client;
-        std::unique_ptr<AirsimGimbal> airsim_gimbal;
         bool airsim_enabled = false;
 
         // ---- 共享状态 ----
@@ -182,15 +179,9 @@ namespace custom_link_bridge
         std::atomic_bool in_hover{false};
         std::atomic_bool use_rate{false};
         std::atomic_bool rc_manual{true};
-        std::atomic<double> current_heading{0.0}; // ENU yaw [rad], CCW-positive, zero East (not compass bearing).
 
         apm_bridge::EMAFilter<double, 1> ema{50};
-        std::unique_ptr<xfrobot::GimbalControl> gimbal;
-
-        // ---- 云台状态 (仅云台工作线程的回调中读写) ----
-        bool gimbal_uav_fusion = false; // 载机惯导数据融合开关 (参数 gimbal.send_uav_data)
-        uint8_t gimbal_last_stat = 0;
-        bool gimbal_last_tca = false;
+        std::unique_ptr<apm_bridge::Gimbal> gimbal;
     };
 
 } // namespace custom_link_bridge
