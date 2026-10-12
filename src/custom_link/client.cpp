@@ -96,6 +96,13 @@ namespace custom_link
         cmd_valid_ = valid;
     }
 
+    void Client::setOffboardRequest(bool offboard)
+    {
+        std::lock_guard<std::mutex> lk(cmd_mtx_);
+        mode_request_ = offboard ? 2 : 0;
+        ++mode_request_revision_;
+    }
+
     TimeSyncState Client::timeSync() const
     {
         std::lock_guard<std::mutex> lk(sync_mtx_);
@@ -370,36 +377,51 @@ namespace custom_link
 
             if (now >= nextSync)
             {
-                nextSync += sync_period_ms_;
+                nextSync += sync_period_;
                 if (up_.load())
                     sendTimesync();
             }
 
             if (now >= nextControl)
             {
-                if (now >= nextControl + control_period_ms_)
-                    nextControl = now + control_period_ms_; // 补偿睡眠超时
+                if (now >= nextControl + control_period_)
+                    nextControl = now + control_period_; // 补偿睡眠超时
                 else
-                    nextControl += control_period_ms_;
+                    nextControl += control_period_;
 
                 if (up_.load())
                 {
                     ControlInput input;
                     bool valid = false;
+                    bool mode_pending = false;
+                    uint64_t mode_revision = 0;
                     {
                         std::lock_guard<std::mutex> lk(cmd_mtx_);
                         input = cmd_;
                         valid = cmd_valid_;
+                        if (mode_request_)
+                            input.mode_req = *mode_request_;
+                        mode_revision = mode_request_revision_;
+                        mode_pending = mode_revision != mode_request_sent_revision_;
+                        if (mode_pending && !valid)
+                        {
+                            input.throttle = 0.0;
+                            std::fill(std::begin(input.rate_dps), std::end(input.rate_dps), 0.0);
+                        }
                     }
                     const bool arm = arm_request_.load();
 
-                    // 发帧条件：控制量新鲜，或仍有解锁请求。arm 为电平语义：
+                    // 发帧条件：控制量新鲜，仍有解锁请求，或有待发送的模式请求。arm 为电平语义：
                     // FC 侧在 arm=1 且未解锁时自行限率重试 tryArm()，主机不
                     // 做边沿脉冲（脉冲会在解锁反馈延迟时误触 DISARM 边沿）。
                     // 全部失效即停发，FC 侧看门狗超时后退回 RC。
-                    if (valid || arm)
+                    if (valid || arm || mode_pending)
                     {
-                        sendControlFrame(arm, input);
+                        if (sendControlFrame(arm, input) && mode_pending)
+                        {
+                            std::lock_guard<std::mutex> lk(cmd_mtx_);
+                            mode_request_sent_revision_ = mode_revision;
+                        }
                     }
                 }
             }
@@ -408,7 +430,7 @@ namespace custom_link
         }
     }
 
-    void Client::sendControlFrame(bool arm, const ControlInput &input)
+    bool Client::sendControlFrame(bool arm, const ControlInput &input)
     {
         protocol::PayloadControl p{};
         p.host_ts_us = monoClockUs(); // 协议定义为主机单调时钟
@@ -426,17 +448,18 @@ namespace custom_link
         uint8_t buf[protocol::kFrameMax];
         const uint8_t len = protocol::encode(protocol::MSG_HOST_CONTROL, 0, &p, sizeof(p), buf, sizeof(buf));
         if (len == 0)
-            return;
+            return false;
         if (!transport_->write(buf, len))
         {
             transport_->close();
             up_ = false;
             if (link_cb_)
                 link_cb_(false);
-            return;
+            return false;
         }
         std::lock_guard<std::mutex> lk(stats_mtx_);
         ++stats_.tx_frames;
+        return true;
     }
 
     void Client::sendTimesync()

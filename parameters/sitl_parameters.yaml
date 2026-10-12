@@ -1,0 +1,47 @@
+custom_link_bridge:
+  ros__parameters:
+    gravity_const: 9.80665
+    mass: 2.0
+    voltage_compensation: false
+    baro_compensation: false
+    channel_trigger: 7 # CH8 / AUX4, zero-based; matches sitl_joystick.py.
+    battery.capacity_mah: 0.0
+    gimbal_port: ""
+
+    # Measured on 2026-10-10: 42 steady-state samples, 2 repeats, throttle 0.08..0.50.
+    # Data: sitl_motor_calibration.csv; RMSE=0.0006233, max throttle error=0.0016002.
+    # A..D map total force [N] to BF collective, NOT ESC throttle/RPM.
+    # Recalibrate after changing the vehicle, PWM endpoints or simulation environment.
+    motor_parameters:
+      A: 0.0
+      B: 0.0
+      C: 0.011891350984191815
+      D: -0.059949564628813956
+      n: 1
+      thrust_limit: 0.5
+      spin_k: 0.0
+
+    airsim:
+      enabled: true
+      host: "127.0.0.1"
+      port: 41451
+      vehicle_name: "Copter"
+      timeout: 1.0
+      link_bind_host: "127.0.0.1"
+      link_port: 5764 # AirSim connects here; only this node connects to FC 5763.
+      camera_name: "0"
+      gimbal_enabled: true
+    link:
+      transport: "tcp"
+      tcp_host: "127.0.0.1"
+      tcp_port: 5763
+      control_rate: 100.0 # Latest-command cache push and 0x20 transmit frequency (Hz).
+      sync_rate: 1.0
+      diag_rate: 0.2
+      rate_limit_dps: 0.0
+    rc:
+      control_timeout: 0.5
+    landed:
+      airborne_altitude: 0.5
+    imu:
+      frame_id: "base_link"

@@ -40,6 +40,8 @@ target_link_libraries(xfgimbal
 # (USE_CUSTOM_LINK, serial/TCP-SITL) 桥接; 云台经私有协议直驱 (默认 C-20S)。
 add_executable(custom_link_bridge_node
   src/custom_link_vehicle_node.cpp
+  src/airsim_gimbal.cpp
+  src/custom_link/sitl_transport.cpp
   src/custom_link/client.cpp
   src/custom_link/transport.cpp
 )
@@ -55,6 +57,19 @@ target_link_libraries(custom_link_bridge_node
 )
 
 target_link_libraries(custom_link_bridge_node xfgimbal)
+
+set(AIRSIM_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../../cosys_airsim" CACHE PATH
+    "Cosys-AirSim checkout containing rpclib sources for the gimbal API")
+option(APM_BRIDGE_AIRSIM "Build AirSim gimbal API support in CustomLinkVehicleNode" OFF)
+if(APM_BRIDGE_AIRSIM)
+  if(NOT EXISTS "${AIRSIM_ROOT}/external/rpclib/rpclib-2.3.1/CMakeLists.txt")
+    message(FATAL_ERROR "AIRSIM_ROOT must contain external/rpclib/rpclib-2.3.1")
+  endif()
+  # Compile with the ROS toolchain: Unreal's prebuilt libc++ SDK has a different ABI.
+  add_subdirectory("${AIRSIM_ROOT}/external/rpclib/rpclib-2.3.1" airsim_rpc EXCLUDE_FROM_ALL)
+  target_compile_definitions(custom_link_bridge_node PRIVATE APM_BRIDGE_AIRSIM)
+  target_link_libraries(custom_link_bridge_node rpc)
+endif()
 
 # 云台协议自检 harness: 供 test/gimbal_pysim_test.py 在 pty 上做协议级仿真验证
 add_executable(gimbal_selftest test/gimbal_selftest.cpp)
@@ -80,5 +95,20 @@ install(DIRECTORY
   parameters
   DESTINATION share/${PROJECT_NAME}/
 )
+
+install(PROGRAMS scripts/sitl_motor_calibration.py
+  DESTINATION lib/${PROJECT_NAME} RENAME sitl_motor_calibration)
+install(FILES scripts/sitl_support.py DESTINATION lib/${PROJECT_NAME})
+
+if(BUILD_TESTING)
+  find_package(ament_cmake_pytest REQUIRED)
+  ament_add_pytest_test(sitl_bridge_test test/sitl_bridge_test.py)
+  add_executable(sitl_relay_test
+    test/sitl_relay_test.cpp src/custom_link/sitl_transport.cpp
+    src/custom_link/transport.cpp src/custom_link/client.cpp)
+  target_link_libraries(sitl_relay_test xfgimbal rclcpp::rclcpp)
+  add_test(NAME sitl_relay_test COMMAND sitl_relay_test)
+  set_tests_properties(sitl_relay_test PROPERTIES TIMEOUT 10)
+endif()
 
 ament_package()

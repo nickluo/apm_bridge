@@ -4,6 +4,9 @@
 #include <chrono>
 #include <cmath>
 #include <limits>
+#include <stdexcept>
+#include <tf2/LinearMath/Matrix3x3.hpp>
+#include "custom_link/sitl_transport.h"
 
 using namespace custom_link_bridge;
 using namespace std::chrono_literals;
@@ -12,6 +15,9 @@ namespace
 {
     constexpr double kDegToRad = M_PI / 180.0;
     constexpr double kRadToDeg = 180.0 / M_PI;
+    constexpr double kSeaLevelPressurePa = 101325.0;
+    constexpr double kReferenceTemperatureKelvin = 273.15;
+    constexpr int kAbsoluteZeroCdeg = -27315;
 
     double normalizeAngle(double a)
     {
@@ -22,13 +28,6 @@ namespace
         return a;
     }
 
-    /// ISA 标准大气：由 BF 估计高度反推气压比。0x11 已直接携带气压，
-    /// 但推力补偿沿用高度模型以保持与 APM/MSP 桥一致的 kp 语义。
-    double isaPressureRatio(double altitude_m)
-    {
-        const double h = std::clamp(altitude_m, -500.0, 11000.0);
-        return std::pow(1.0 - 2.25577e-5 * h, 5.25588);
-    }
 } // namespace
 
 CustomLinkVehicleNode::CustomLinkVehicleNode()
@@ -52,6 +51,7 @@ CustomLinkVehicleNode::CustomLinkVehicleNode()
     this->declare_parameter<double>("motor_parameters.vbat_a", 0.0);
     this->declare_parameter<double>("motor_parameters.vbat_b", 1.0);
     this->declare_parameter<std::string>("gimbal_port", "");
+    airsim_enabled = this->declare_parameter<bool>("airsim.enabled", false);
 
     this->declare_parameter<std::string>("link.transport", "serial"); // serial | tcp
     this->declare_parameter<std::string>("link.serial_port", "/dev/ttyACM0");
@@ -78,6 +78,8 @@ CustomLinkVehicleNode::CustomLinkVehicleNode()
     this->get_parameter("channel_trigger", channel_trigger);
     this->get_parameter("voltage_compensation", voltage_compensation);
     this->get_parameter("baro_compensation", baro_compensation);
+    if (baro_compensation)
+        kp = kReferenceTemperatureKelvin / (kReferenceTemperatureKelvin + baro_temperature_c);
     this->get_parameter("motor_parameters.A", motor_params.A);
     this->get_parameter("motor_parameters.B", motor_params.B);
     this->get_parameter("motor_parameters.C", motor_params.C);
@@ -100,6 +102,16 @@ CustomLinkVehicleNode::CustomLinkVehicleNode()
     this->get_parameter("imu.frame_id", imu_frame_id);
     this->get_parameter("rc.control_timeout", control_timeout);
     this->get_parameter("landed.airborne_altitude", airborne_altitude);
+    if (airsim_enabled && (voltage_compensation || baro_compensation))
+        throw std::invalid_argument("AirSim SITL requires voltage_compensation=false and baro_compensation=false");
+    if (airsim_enabled &&
+        (!std::isfinite(mass) || mass <= 0 || !std::isfinite(gravity) || gravity <= 0 ||
+         !std::isfinite(control_timeout) || control_timeout <= 0 || motor_params.n_motors <= 0 ||
+         !std::isfinite(motor_params.thrust_limit) || motor_params.thrust_limit <= 0 ||
+         motor_params.thrust_limit > 1 ||
+         !std::isfinite(motor_params.A) || !std::isfinite(motor_params.B) ||
+         !std::isfinite(motor_params.C) || !std::isfinite(motor_params.D)))
+        throw std::invalid_argument("Invalid SITL mass, gravity, timeout or motor model");
 
     RCLCPP_INFO(this->get_logger(),
                 "Motor parameters: A=%.6f, B=%.6f, C=%.6f, D=%.6f, n=%d, voltage_max=%.6f, spin_k=%.6f, vbat_a=%.6f, vbat_b=%.6f, volt_ref=%.6f",
@@ -120,6 +132,8 @@ CustomLinkVehicleNode::CustomLinkVehicleNode()
     // ---------------- 云台 (可选, 支持 C-20S/C-40D/C-200T) ----------------
     std::string gimbal_port;
     this->get_parameter("gimbal_port", gimbal_port);
+    if (airsim_enabled && !gimbal_port.empty())
+        throw std::invalid_argument("AirSim SITL requires an empty gimbal_port");
     if (!gimbal_port.empty())
     {
         xfrobot::GimbalConfig gimbal_cfg = xfrobot::GimbalConfig::fromParameters(*this);
@@ -171,6 +185,7 @@ CustomLinkVehicleNode::CustomLinkVehicleNode()
     ap_feedback_pub = this->create_publisher<quadrotor_msgs::msg::LowLevelFeedback>("~/low_level_feedback", 10);
     gimbal_imu_pub = this->create_publisher<sensor_msgs::msg::Imu>("/fpv/gimbal", 10);
     trigger_pub = this->create_publisher<std_msgs::msg::Header>("/fpv/tracker_trigger", 10);
+    altitude_pub = this->create_publisher<std_msgs::msg::Float64>("/fpv/altitude", rclcpp::SensorDataQoS());
     // GPS / 失效保护 (0x12 PayloadSlow, 10 Hz)：沿用 MAVROS 话题名，OSD 与
     // 其他节点可直接复用 mavros 消费习惯
     gpsraw_pub = this->create_publisher<mavros_msgs::msg::GPSRAW>(
@@ -188,6 +203,9 @@ CustomLinkVehicleNode::CustomLinkVehicleNode()
     arm_interface_sub = this->create_subscription<std_msgs::msg::Bool>(
         "~/arm", rclcpp::QoS(rclcpp::KeepLast(1)).best_effort(),
         std::bind(&CustomLinkVehicleNode::armCallback, this, std::placeholders::_1));
+    offboard_interface_sub = this->create_subscription<std_msgs::msg::Bool>(
+        "~/offboard", rclcpp::QoS(rclcpp::KeepLast(1)).best_effort(),
+        std::bind(&CustomLinkVehicleNode::offboardCallback, this, std::placeholders::_1));
 
     tracker_state_sub = this->create_subscription<std_msgs::msg::Int8>(
         "/fpv/tracker_state", 1,
@@ -243,9 +261,33 @@ CustomLinkVehicleNode::CustomLinkVehicleNode()
     this->get_parameter("link.sync_rate", sync_rate);
     this->get_parameter("link.diag_rate", diag_rate);
     this->get_parameter("link.rate_limit_dps", rate_limit_dps);
+    const auto control_period = custom_link::periodFromRate(control_rate);
 
     std::unique_ptr<custom_link::Transport> transport;
-    if (transport_kind == "tcp")
+    if (airsim_enabled)
+    {
+        if (transport_kind != "tcp")
+            throw std::invalid_argument("AirSim SITL requires link.transport=tcp");
+        const auto bind_host = this->declare_parameter<std::string>("airsim.link_bind_host", "127.0.0.1");
+        const int bind_port = this->declare_parameter<int>("airsim.link_port", 5764);
+        if (bind_port <= 0 || bind_port > 65535 || tcp_port <= 0 || tcp_port > 65535 || bind_port == tcp_port)
+            throw std::invalid_argument("AirSim relay and FC TCP ports must be valid and distinct");
+        transport = std::make_unique<custom_link::SitlTransport>(
+            tcp_host, static_cast<uint16_t>(tcp_port), bind_host, static_cast<uint16_t>(bind_port), this->get_logger());
+        if (this->declare_parameter<bool>("airsim.gimbal_enabled", true))
+        {
+            airsim_gimbal = std::make_unique<AirsimGimbal>(*this, [this](auto msg) {
+                const tf2::Quaternion q(msg->orientation.x, msg->orientation.y,
+                                        msg->orientation.z, msg->orientation.w);
+                const tf2::Quaternion heading(tf2::Vector3(0, 0, 1), current_heading.load());
+                tf2::Matrix3x3(heading.inverse() * q).getRPY(msg->orientation_covariance[0],
+                    msg->orientation_covariance[1], msg->orientation_covariance[2]);
+                gimbal_imu_pub->publish(std::move(msg));
+            });
+            airsim_gimbal->start();
+        }
+    }
+    else if (transport_kind == "tcp")
     {
         RCLCPP_INFO(this->get_logger(), "Custom link over TCP %s:%d", tcp_host.c_str(), tcp_port);
         transport = std::make_unique<TcpTransport>(tcp_host, static_cast<uint16_t>(tcp_port));
@@ -302,7 +344,7 @@ CustomLinkVehicleNode::CustomLinkVehicleNode()
 
     // 控制量推送：回调只写缓存，这里统一判新鲜度并转换体轴后下发。
     // 超时后只作废控制量，arm 请求不动（链路恢复后自动重试解锁边沿）。
-    cmd_push_timer = this->create_wall_timer(std::chrono::milliseconds(20), [this]() { pushControl(); });
+    cmd_push_timer = this->create_wall_timer(control_period, [this]() { pushControl(); });
 
     diag_timer = this->create_wall_timer(
         std::chrono::milliseconds(static_cast<int>(1000.0 / std::max(0.05, diag_rate))), [this]() {
@@ -329,6 +371,8 @@ CustomLinkVehicleNode::CustomLinkVehicleNode()
 
 CustomLinkVehicleNode::~CustomLinkVehicleNode()
 {
+    if (airsim_gimbal)
+        airsim_gimbal->stop();
     if (client)
         client->stop();
 }
@@ -455,11 +499,47 @@ void CustomLinkVehicleNode::handleMedium(const custom_link::protocol::PayloadMed
     rcTriggerUpdate(p.rc, 16);
 
     const double alt = p.baro_alt_cm * 0.01; // cm -> m
-    altitude_m.store(alt);
+    if (airsim_enabled)
+    {
+        // SITL reports absolute barometric altitude, not height above the launch surface.
+        const double filtered = sitl_altitude_ema.filter(alt);
+        if (armed_feedback_valid && !armed.load())
+        {
+            sitl_ground_altitude = filtered;
+            sitl_ground_valid = true;
+        }
+        altitude_m.store(filtered - sitl_ground_altitude);
+    }
+    else
+    {
+        altitude_m.store(alt);
+    }
+    std_msgs::msg::Float64 altitude;
+    altitude.data = alt;
+    altitude_pub->publish(altitude);
     if (baro_compensation)
     {
         std::lock_guard<std::mutex> lk(mtx_kp);
-        kp = isaPressureRatio(alt);
+        if (p.temp_cdeg > kAbsoluteZeroCdeg)
+        {
+            baro_temperature_c = p.temp_cdeg * 0.01;
+        }
+        else
+        {
+            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                                "Ignoring invalid barometric temperature %.2f C; retaining the previous temperature",
+                                p.temp_cdeg * 0.01);
+        }
+        if (p.baro_pa > 0)
+        {
+            kp = (static_cast<double>(p.baro_pa) / kSeaLevelPressurePa) *
+                 (kReferenceTemperatureKelvin / (kReferenceTemperatureKelvin + baro_temperature_c));
+        }
+        else
+        {
+            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                                "Ignoring zero barometric pressure; retaining the previous pressure compensation factor");
+        }
     }
 
     const rclcpp::Time stamp(static_cast<int64_t>(hostUs) * 1000, RCL_ROS_TIME);
@@ -488,6 +568,7 @@ void CustomLinkVehicleNode::handleSlow(const custom_link::protocol::PayloadSlow 
 
     const bool now_armed = (p.status & custom_link::protocol::STATUS_ARMED) != 0;
     armed.store(now_armed);
+    armed_feedback_valid = true;
     client->setArmedFeedback(now_armed);
 
     publishState(p.mode_flags, now_armed);
@@ -586,6 +667,11 @@ void CustomLinkVehicleNode::publishState(uint32_t mode_flags, bool is_armed)
     const double alt = altitude_m.load();
     if (!is_armed)
         landed_state.store(mavros_msgs::msg::ExtendedState::LANDED_STATE_ON_GROUND);
+    else if (airsim_enabled && !sitl_ground_valid)
+    {
+        landed_state.store(mavros_msgs::msg::ExtendedState::LANDED_STATE_UNDEFINED);
+        RCLCPP_WARN_ONCE(this->get_logger(), "SITL ground reference unavailable; landed state is undefined");
+    }
     else
         landed_state.store(alt > airborne_altitude
                                ? mavros_msgs::msg::ExtendedState::LANDED_STATE_IN_AIR
@@ -654,6 +740,13 @@ void CustomLinkVehicleNode::pushControl()
     }
     // 发送前角速度限幅（deg/s，0 = 不限制）。独立于固件侧
     // custom_link_rate_limit_dps，作为客户端防御层；生效值取两者中更小。
+    if (airsim_enabled && fresh &&
+        (!std::isfinite(input.throttle) || !std::all_of(std::begin(input.rate_dps), std::end(input.rate_dps),
+                                                      [](double rate) { return std::isfinite(rate); })))
+    {
+        fresh = false;
+        RCLCPP_ERROR_THROTTLE(this->get_logger(), *this->get_clock(), 2000, "Rejected non-finite SITL control");
+    }
     if (fresh && rate_limit_dps > 0.0)
     {
         for (int i = 0; i < 3; i++)
@@ -675,8 +768,7 @@ void CustomLinkVehicleNode::ctrlCommandCallback(const quadrotor_msgs::msg::Contr
         return;
     }
 
-    // 未解锁或未进入 OFFBOARD 时不受理：OFFBOARD 的进入本身需要本节点持续
-    // 发送控制流 + 飞手保持 BOXOFFBOARD 开关，所以解锁后首帧命令即可接管。
+    // 未解锁时不受理；解锁后的控制流是否接管由 FC 的 OFFBOARD 授权仲裁决定。
     if (command->armed == 0 || !armed.load())
         return;
 
@@ -730,9 +822,15 @@ void CustomLinkVehicleNode::ctrlCommandRawCallback(const quadrotor_msgs::msg::Co
 
 void CustomLinkVehicleNode::armCallback(const std_msgs::msg::Bool::SharedPtr msg)
 {
-    // 解锁最终由飞手侧 BOXOFFBOARD 开关把关：开关未开时 FC 不会受理
-    // 主机解锁（tryArm 全量安全检查照走）。
+    // 解锁请求与模式请求独立；FC 仍执行 OFFBOARD 授权与 tryArm 安全检查。
     client->setArmRequest(msg->data);
+}
+
+void CustomLinkVehicleNode::offboardCallback(const std_msgs::msg::Bool::SharedPtr msg)
+{
+    client->setOffboardRequest(msg->data);
+    RCLCPP_INFO(this->get_logger(), "Requested custom-link mode: %s",
+                msg->data ? "OFFBOARD" : "MANUAL");
 }
 
 void CustomLinkVehicleNode::rcTriggerUpdate(const uint16_t *channels, size_t count)

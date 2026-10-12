@@ -11,3 +11,4 @@ build/
 src/test
 src/test.cpp
 **/__pycache__/
+*.csv

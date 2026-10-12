@@ -5,6 +5,7 @@
 #include <std_msgs/msg/bool.hpp>
 #include <std_msgs/msg/header.hpp>
 #include <std_msgs/msg/int8.hpp>
+#include <std_msgs/msg/float64.hpp>
 #include "quadrotor_msgs/msg/control_command.hpp"
 #include "quadrotor_msgs/msg/low_level_feedback.hpp"
 #include <mavros_msgs/msg/extended_state.hpp>
@@ -31,6 +32,7 @@
 #include "quadratic_thrust_model.h"
 #include "ema_filter.h"
 #include "gimbal.h"
+#include "airsim_gimbal.h"
 
 namespace custom_link_bridge
 {
@@ -43,8 +45,8 @@ namespace custom_link_bridge
     ///     到主机时基（取代 MSP 的事务中点估计）
     ///   - 控制直发角速度 + 油门 (0x20)，取代 MSP_SET_RAW_RC 摇杆量映射
     ///
-    /// 外部控制要求 Betaflight 侧打开 OFFBOARD 模式 (BOXOFFBOARD 开关)：
-    /// 开关在飞手遥控器上，激活后 FC 才受理主机解锁/接管。
+    /// 外部控制通过自定义协议请求 OFFBOARD，或由飞手 BOXOFFBOARD 开关授权；
+    /// 飞手接管、GPS Rescue 与固件解锁安全检查仍由 FC 仲裁。
     class CustomLinkVehicleNode : public rclcpp::Node
     {
     public:
@@ -86,6 +88,7 @@ namespace custom_link_bridge
         rclcpp::Publisher<quadrotor_msgs::msg::LowLevelFeedback>::SharedPtr ap_feedback_pub;
         rclcpp::Publisher<sensor_msgs::msg::Imu>::SharedPtr gimbal_imu_pub;
         rclcpp::Publisher<std_msgs::msg::Header>::SharedPtr trigger_pub;
+        rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr altitude_pub;
         // GPS / mAh / 失效保护 (0x12 PayloadSlow 携带，10 Hz)
         rclcpp::Publisher<mavros_msgs::msg::GPSRAW>::SharedPtr gpsraw_pub;
         rclcpp::Publisher<sensor_msgs::msg::NavSatFix>::SharedPtr navsat_pub;
@@ -94,6 +97,7 @@ namespace custom_link_bridge
         rclcpp::Subscription<quadrotor_msgs::msg::ControlCommand>::SharedPtr control_command_sub;
         rclcpp::Subscription<quadrotor_msgs::msg::ControlCommand>::SharedPtr control_command_raw_sub;
         rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr arm_interface_sub;
+        rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr offboard_interface_sub;
         rclcpp::Subscription<std_msgs::msg::Int8>::SharedPtr tracker_state_sub;
         rclcpp::Subscription<std_msgs::msg::Int8>::SharedPtr radar_state_sub;
         rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr mission_state_sub;
@@ -102,12 +106,13 @@ namespace custom_link_bridge
         rclcpp::TimerBase::SharedPtr diag_timer;
         rclcpp::TimerBase::SharedPtr cmd_push_timer;
 
-        /// 把最新控制量（含新鲜度判定）推给链路客户端；50 Hz。
+        /// 按 link.control_rate 把最新控制量（含新鲜度判定）推给链路客户端。
         void pushControl();
 
         void ctrlCommandCallback(const quadrotor_msgs::msg::ControlCommand::SharedPtr command);
         void ctrlCommandRawCallback(const quadrotor_msgs::msg::ControlCommand::SharedPtr command);
         void armCallback(const std_msgs::msg::Bool::SharedPtr msg);
+        void offboardCallback(const std_msgs::msg::Bool::SharedPtr msg);
         void rcTriggerUpdate(const uint16_t *channels, size_t count);
 
         // ---- 链路回调 (读取线程上下文) ----
@@ -137,10 +142,13 @@ namespace custom_link_bridge
         double rate_limit_dps = 0.0;      // 发送前角速度限幅, 0 = 不限制
 
         std::unique_ptr<custom_link::Client> client;
+        std::unique_ptr<AirsimGimbal> airsim_gimbal;
+        bool airsim_enabled = false;
 
         // ---- 共享状态 ----
         std::mutex mtx_kp;
         double kp = 1.0;
+        double baro_temperature_c = 20.0;
         double battery_voltage = 0.0;
 
         std::mutex mtx_cmd;
@@ -163,6 +171,10 @@ namespace custom_link_bridge
         std::atomic_bool radar_tracking{false};
         std::atomic_bool in_mission{false};
         std::atomic<double> altitude_m{0.0};
+        apm_bridge::EMAFilter<double, 1> sitl_altitude_ema{20};
+        double sitl_ground_altitude = 0.0;
+        bool sitl_ground_valid = false;
+        bool armed_feedback_valid = false;
 
         std::atomic_bool in_hover{false};
         std::atomic_bool use_rate{false};

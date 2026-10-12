@@ -19,8 +19,8 @@ def generate_launch_description():
     Betaflight side requirements:
       * firmware built with USE_CUSTOM_LINK (custom_comm branch)
       * the link UART assigned the CUSTOM_LINK function (defaults seed it)
-      * an AUX switch assigned to OFFBOARD - the host can only arm/take over
-        while the pilot holds that switch
+      * OFFBOARD requested through the custom link or a pilot AUX switch;
+        firmware safety checks and pilot takeover arbitration remain active
     """
     pkg_share = get_package_share_directory('apm_bridge')
 
@@ -46,6 +46,7 @@ def generate_launch_description():
             ('~/control_command', '/fpv/control_command'),
             ('~/control_command_raw', '/fpv/control_command_raw'),
             ('~/arm', '/fpv/arm'),
+            ('~/offboard', '/fpv/offboard'),
         ]
     )
 

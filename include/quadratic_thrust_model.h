@@ -49,7 +49,7 @@ namespace quadratic_thrust_model
         return (3.0 * params.A * x * x) + (2.0 * params.B * x) + params.C;
     }
 
-    // kp = (baro/101325.0) * (273.15/(273.15+temp));
+    // kp = (baro_pressure_pa / 101325.0) * (273.15 / (273.15 + temperature_c));
 
     // vbat 电压因子 phi(V) = (a*V+b)/(a*V_ref+b):
     // 当前电压下的力 <-> 标准电压 (V_ref) 口径力 的换算。

@@ -8,10 +8,13 @@
 
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
+#include <stdexcept>
 #include <string>
 #include <thread>
 
@@ -53,6 +56,17 @@ namespace custom_link
     /// 主机单调钟 (steady_clock, us)。对时模型的内部时基，免疫 NTP 调整。
     uint64_t monoClockUs();
 
+    inline std::chrono::nanoseconds periodFromRate(double rate_hz)
+    {
+        if (!std::isfinite(rate_hz) || rate_hz <= 0.0)
+            throw std::invalid_argument("Link rate must be finite and positive");
+        const long double period_ns = 1.0e9L / rate_hz;
+        if (period_ns < 1.0L ||
+            period_ns >= static_cast<long double>(std::chrono::nanoseconds::max().count()))
+            throw std::invalid_argument("Link rate period must be representable in nanoseconds");
+        return std::chrono::nanoseconds(static_cast<std::chrono::nanoseconds::rep>(period_ns));
+    }
+
     class Client
     {
     public:
@@ -83,6 +97,10 @@ namespace custom_link
         void setArmRequest(bool arm) { arm_request_ = arm; }
         void setArmedFeedback(bool armed) { armed_feedback_ = armed; }
 
+        /// 显式模式请求：发送一次 0x20（即使无控制量），随后控制帧沿用该模式。
+        /// 不改变 arm 请求，也不替代持续控制流/FC 看门狗。
+        void setOffboardRequest(bool offboard);
+
         /// 主动触发一次对时（另有周期性自动对时）。
         void requestTimeSync();
 
@@ -95,8 +113,10 @@ namespace custom_link
 
         void setRates(double control_rate_hz, double sync_rate_hz)
         {
-            control_period_ms_ = std::chrono::milliseconds(static_cast<int>(1000.0 / control_rate_hz));
-            sync_period_ms_ = std::chrono::milliseconds(static_cast<int>(1000.0 / sync_rate_hz));
+            const auto control_period = periodFromRate(control_rate_hz);
+            const auto sync_period = periodFromRate(sync_rate_hz);
+            control_period_ = control_period;
+            sync_period_ = sync_period;
         }
 
     private:
@@ -104,7 +124,7 @@ namespace custom_link
         void senderLoop();
         void handleFrame(const protocol::Frame &frame, uint64_t completeUs);
         bool ensureOpen();
-        void sendControlFrame(bool arm, const ControlInput &input);
+        bool sendControlFrame(bool arm, const ControlInput &input);
         void sendTimesync();
 
         // ---- 对时模型（均持 sync_mtx_ 调用） ----
@@ -154,13 +174,16 @@ namespace custom_link
         std::mutex cmd_mtx_;
         ControlInput cmd_;
         bool cmd_valid_ = false;
+        std::optional<uint8_t> mode_request_;
+        uint64_t mode_request_revision_ = 0;
+        uint64_t mode_request_sent_revision_ = 0;
         std::atomic_bool arm_request_{false};
         std::atomic_bool armed_feedback_{false};
 
         // 发送侧序列
         uint16_t cmd_seq_ = 0;
-        std::chrono::milliseconds control_period_ms_{10};
-        std::chrono::milliseconds sync_period_ms_{1000};
+        std::chrono::nanoseconds control_period_{std::chrono::milliseconds(10)};
+        std::chrono::nanoseconds sync_period_{std::chrono::milliseconds(1000)};
 
         // 时间同步（读取线程写，任意线程读；互斥保护）
         mutable std::mutex sync_mtx_;
