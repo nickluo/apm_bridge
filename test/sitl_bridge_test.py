@@ -52,6 +52,43 @@ def test_shared_pitch_launch_preserves_yaml_unless_overridden(monkeypatch, tmp_p
     assert "pitch_hold" in names and "fixed_pitch" not in names
 
 
+@pytest.mark.parametrize("launch_file", ["custom_link.launch.py", "sitl.launch.py"])
+@pytest.mark.parametrize("value,expected", [("", None), ("0.0", 0.0), ("-55.0", -55.0), ("10.0", 10.0)])
+def test_aim_launch_preserves_yaml_unless_overridden(monkeypatch, tmp_path, launch_file, value, expected):
+    from launch import LaunchContext
+    from launch.actions import DeclareLaunchArgument
+    from launch_ros.utilities import evaluate_parameters, normalize_parameters
+
+    spec = importlib.util.spec_from_file_location("aim_launch", ROOT / "launch" / launch_file)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    class CaptureNode:
+        def __init__(self, **kwargs):
+            self.parameters = normalize_parameters(kwargs["parameters"])
+
+    (tmp_path / "parameters").mkdir()
+    parameter_file = tmp_path / "parameters" / (
+        "sitl_parameters.yaml" if launch_file == "sitl.launch.py" else "custom_link_parameters.yaml")
+    parameter_file.write_text("custom_link_bridge:\n  ros__parameters:\n    gimbal:\n      pitch_aim: -20.0\n")
+    monkeypatch.setattr(module, "Node", CaptureNode)
+    monkeypatch.setattr(module, "get_package_share_directory", lambda _: str(tmp_path))
+    context = LaunchContext()
+    context.launch_configurations.update(
+        transport="tcp", serial_port="/not-used", baudrate="921600", tcp_host="127.0.0.1",
+        tcp_port="5763", gimbal_port="", gimbal_model="C20S", pitch_hold="", pitch_aim=value,
+        parameters=str(parameter_file), airsim_host="127.0.0.1", airsim_port="41451",
+        vehicle_name="Copter", airsim_link_port="5764", camera_name="0", gimbal_enabled="true")
+    parameters = evaluate_parameters(context, module._launch_node(context)[0].parameters)
+    overrides = [entry["gimbal.pitch_aim"] for entry in parameters
+                 if isinstance(entry, dict) and "gimbal.pitch_aim" in entry]
+    assert overrides == ([] if expected is None else [expected])
+    assert yaml.safe_load(parameter_file.read_text())["custom_link_bridge"]["ros__parameters"]["gimbal"]["pitch_aim"] == -20.0
+    names = {entity.name for entity in module.generate_launch_description().entities
+             if isinstance(entity, DeclareLaunchArgument)}
+    assert "pitch_aim" in names
+
+
 def q(x=0.0, y=0.0, z=0.0, w=1.0):
     return SimpleNamespace(x_val=x, y_val=y, z_val=z, w_val=w)
 

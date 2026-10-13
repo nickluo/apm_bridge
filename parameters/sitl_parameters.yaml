@@ -7,6 +7,17 @@ custom_link_bridge:
     channel_trigger: 7 # CH8 / AUX4, zero-based; matches sitl_joystick.py.
     battery.capacity_mah: 0.0
     gimbal_port: ""
+    gimbal:
+      model: "C20S"
+      pitch_aim: -15.0 # AIM requests 90 + this offset (deg), toward body FLU +Z; joint limits still apply.
+      pitch_hold: 0.0 # HORIZON alone: positive nose-up, degrees. MISSION centers LOS at zero.
+      tracking_gain: 2.0
+      tracking_max_rate: 30.0 # deg/s, per actuated axis.
+      tracking_max_accel: 90.0 # deg/s^2.
+      tracking_filter_tau: 0.15 # seconds.
+      los_timeout: 0.3 # seconds.
+      roll_hold_enter: 75.0
+      roll_hold_exit: 70.0
 
     # Measured on 2026-10-10: 42 steady-state samples, 2 repeats, throttle 0.08..0.50.
     # Data: sitl_motor_calibration.csv; RMSE=0.0006233, max throttle error=0.0016002.
@@ -42,6 +53,9 @@ custom_link_bridge:
     rc:
       control_timeout: 0.5
     landed:
-      airborne_altitude: 0.5
+      airborne_altitude: 0.1
+      landing_altitude: 0.05
+      takeoff_confirm_time: 0.5
+      landing_confirm_time: 1.0
     imu:
       frame_id: "base_link"

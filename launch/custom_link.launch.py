@@ -39,6 +39,9 @@ def _launch_node(context):
     pitch_hold = LaunchConfiguration('pitch_hold').perform(context)
     if pitch_hold:
         parameters.append({'gimbal.pitch_hold': ParameterValue(LaunchConfiguration('pitch_hold'), value_type=float)})
+    pitch_aim = LaunchConfiguration('pitch_aim', default='')
+    if pitch_aim.perform(context):
+        parameters.append({'gimbal.pitch_aim': ParameterValue(pitch_aim, value_type=float)})
 
     custom_link_node = Node(
         package='apm_bridge',
@@ -97,6 +100,10 @@ def generate_launch_description():
             'gimbal_model',
             default_value='C20S',
             description="Gimbal model: 'C20S' (1-axis), 'C40D' (2-axis) or 'C200T' (3-axis)."
+        ),
+        DeclareLaunchArgument(
+            'pitch_aim', default_value='',
+            description='Optional AIM offset (deg, nose-up): body-relative target is 90 + pitch_aim, subject to limits; empty keeps YAML.'
         ),
         OpaqueFunction(function=_launch_node),
     ])

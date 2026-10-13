@@ -133,12 +133,49 @@ namespace
         require(rejected, "obsolete fixed_pitch was silently ignored");
 
         options.parameter_overrides({rclcpp::Parameter("gimbal.model", "C20S"),
+                                     rclcpp::Parameter("gimbal.pitch_aim", -55.0),
                                      rclcpp::Parameter("gimbal.pitch_hold", 18.0)});
         auto hardware = std::make_shared<rclcpp::Node>("gimbal_shared_pitch_test", options);
         const auto config = xfrobot::GimbalConfig::fromParameters(*hardware);
         require(config.pitch_hold_deg == 18.0f, "shared pitch_hold changed the hardware control target");
+        require(config.pitch_aim_deg == -55.0f && config.aimTargetDegrees()[1] == 35.0,
+                "pitch_aim was coupled to HORIZON pitch_hold");
         require(hardware->has_parameter("gimbal.pitch_hold") && !hardware->has_parameter("gimbal.fixed_pitch"),
                 "hardware declared more than one pitch parameter");
+    }
+
+    void aimAndMissionLimits()
+    {
+        for (const auto model : {xfrobot::GimbalModel::C20S, xfrobot::GimbalModel::C40D, xfrobot::GimbalModel::C200T})
+        {
+            auto config = xfrobot::GimbalConfig::defaultsFor(model);
+            require(config.aimTargetDegrees()[1] == 40.0, "unreachable body +Z AIM was not limited safely");
+            config.pitch.max_deg = 120;
+            const auto fromPitch = [](double degrees) {
+                return tf2::Quaternion(tf2::Vector3(0, 1, 0), -degrees * M_PI / 180.0);
+            };
+            for (double offset : {-10.0, 0.0, 10.0})
+            {
+                config.pitch_aim_deg = offset;
+                const auto aim = config.aimTargetDegrees();
+                const auto desired = fromPitch(aim[1]);
+                const auto forward = tf2::quatRotate(desired, tf2::Vector3(1, 0, 0));
+                require(std::abs(forward.x() + std::sin(offset * M_PI / 180.0)) < 1e-8 &&
+                        std::abs(forward.z() - std::cos(offset * M_PI / 180.0)) < 1e-8,
+                        "AIM does not reference body FLU +Z with a nose-up offset");
+                require(std::abs(desired.dot(config.constrainMissionOrientation(desired))) > .999999,
+                        "joint-limit decomposition flipped the camera at 90-degree pitch");
+            }
+            const auto upper = config.constrainMissionOrientation(fromPitch(140));
+            require(std::abs(upper.dot(fromPitch(120))) > .999999, "MISSION upper pitch limit failed");
+            const auto lower = config.constrainMissionOrientation(fromPitch(-150));
+            require(std::abs(lower.dot(fromPitch(-135))) > .999999, "MISSION lower pitch limit failed");
+            config.pitch_aim_deg = 91;
+            bool rejected = false;
+            try { config.aimTargetDegrees(); }
+            catch (const std::invalid_argument &) { rejected = true; }
+            require(rejected, "invalid pitch_aim was accepted");
+        }
     }
 
     void strapdownBackend()
@@ -256,6 +293,8 @@ namespace
         std::vector<uint8_t> buffer;
         bool fusion_seen = false;
         unsigned stop_packets = 0;
+        xfrobot::Gcu2GbcPkt_t latest_control{};
+        int16_t pitch_encoder = -2000;
         auto service = [&]() {
             std::array<uint8_t, 4096> input{};
             const auto count = ::read(pty.fd, input.data(), input.size());
@@ -273,6 +312,8 @@ namespace
                 xfrobot::Gcu2GbcPkt_t packet;
                 std::memcpy(&packet, buffer.data(), sizeof(packet));
                 buffer.erase(buffer.begin(), buffer.begin() + sizeof(packet));
+                if (packet.cmd.value == 4)
+                    latest_control = packet;
                 if (packet.cmd.value == 3)
                     ++stop_packets;
                 if (packet.uav.valid)
@@ -291,7 +332,7 @@ namespace
                 reply.cmd.stat = 1;
                 reply.cam_angle[0] = 800;
                 reply.cam_angle[1] = -1200;
-                reply.mtr_angle[0] = -2000;
+                reply.mtr_angle[0] = pitch_encoder;
                 reply.mtr_angle[1] = 1000;
                 reply.mtr_angle[2] = -600;
                 reply.cam_rate[0] = 10;
@@ -328,6 +369,56 @@ namespace
         require(msg.header.frame_id == "base_link", "hardware frame changed");
         require(std::abs(msg.orientation_covariance[2] - 6 * M_PI / 180) < 1e-6, "hardware legacy Euler slots changed");
         require(msg.angular_velocity.z < 0, "hardware CW -> CCW yaw-rate conversion changed");
+        gimbal->setMode(apm_bridge::GimbalMode::AIM);
+        drive(std::chrono::milliseconds(100), true);
+        for (const auto &axis : latest_control.gbc)
+            require(axis.wk_mode == 2 && axis.op_type == 0, "AIM is not FPV angle control");
+        require(latest_control.gbc[0].op_value == 0 && latest_control.gbc[1].op_value == 4000 &&
+                latest_control.gbc[2].op_value == 0, "AIM body +Z target did not respect default pitch limit");
+        gimbal->setMode(apm_bridge::GimbalMode::MISSION);
+        gimbal->updateTargetLos({true, .2, -.3, .05, -.07});
+        drive(std::chrono::milliseconds(200), true);
+        require(latest_control.gbc[1].op_value < 0 && latest_control.gbc[2].op_value > 0,
+                "MISSION FLU -> vendor pitch/yaw signs");
+        for (const auto &axis : latest_control.gbc)
+            require(axis.wk_mode == 1 && axis.op_type == 2 && std::abs(axis.op_value) <= 300,
+                    "MISSION did not use limited locked real rates");
+        pitch_encoder = -13500;
+        gimbal->updateTargetLos({true, .2, 0, 0, 0});
+        drive(std::chrono::milliseconds(100), true);
+        require(latest_control.gbc[1].op_value == 0, "MISSION pushed outward at lower pitch limit");
+        gimbal->updateTargetLos({true, -.2, 0, 0, 0});
+        drive(std::chrono::milliseconds(250), true);
+        require(latest_control.gbc[1].op_value > 0, "MISSION could not return inward from lower pitch limit");
+        pitch_encoder = 4000;
+        gimbal->updateTargetLos({true, -.2, 0, 0, 0});
+        drive(std::chrono::milliseconds(100), true);
+        require(latest_control.gbc[1].op_value == 0, "MISSION pushed outward at upper pitch limit");
+        gimbal->updateTargetLos({true, .2, 0, 0, 0});
+        drive(std::chrono::milliseconds(250), true);
+        require(latest_control.gbc[1].op_value < 0, "MISSION could not return inward from upper pitch limit");
+        pitch_encoder = -2000;
+        drive(std::chrono::milliseconds(1300), true);
+        require(std::abs(latest_control.gbc[1].op_value) <= 1 && std::abs(latest_control.gbc[2].op_value) <= 1,
+                "MISSION stale target did not decelerate to hold");
+        gimbal->setMode(apm_bridge::GimbalMode::HORIZON);
+        drive(std::chrono::milliseconds(100), true);
+        require(latest_control.gbc[1].wk_mode == 1 && latest_control.gbc[1].op_value > 0,
+                "HORIZON did not restore stabilization");
+        gimbal->setMode(apm_bridge::GimbalMode::MISSION);
+        gimbal->updateTargetLos({true, .2, -.3, 0, 0});
+        drive(std::chrono::milliseconds(100), true);
+        const auto no_feedback_deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(350);
+        while (std::chrono::steady_clock::now() < no_feedback_deadline)
+        {
+            rclcpp::spin_some(node);
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+        const auto no_feedback_count = capture.count();
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        rclcpp::spin_some(node);
+        require(capture.count() == no_feedback_count, "stale hardware feedback fabricated a fresh gimbal pose");
+        gimbal->setMode(apm_bridge::GimbalMode::HORIZON);
         gimbal->stop();
         gimbal->stop();
         const auto stopped_count = capture.count();
@@ -348,8 +439,13 @@ namespace
     };
     struct RpcPose
     {
+        struct Position
+        {
+            double x_val = 0, y_val = 0, z_val = 0;
+            MSGPACK_DEFINE_MAP(x_val, y_val, z_val);
+        } position;
         RpcOrientation orientation;
-        MSGPACK_DEFINE_MAP(orientation);
+        MSGPACK_DEFINE_MAP(position, orientation);
     };
     struct RpcCamera
     {
@@ -360,9 +456,38 @@ namespace
     void airsimBackend()
     {
         rpc::server server("127.0.0.1", 0);
-        server.bind("simGetCameraInfo", [](const std::string &camera, const std::string &vehicle) {
+        std::mutex rpc_mutex;
+        tf2::Quaternion body_ned(0, 0, 0, 1), camera_relative(0, 0, 0, 1);
+        const tf2::Vector3 mount(.3, 0, -.2);
+        size_t writes = 0;
+        const auto toRpc = [](const tf2::Quaternion &q) {
+            return RpcOrientation{q.x(), q.y(), q.z(), q.w()};
+        };
+        server.bind("simGetCameraInfo", [&](const std::string &camera, const std::string &vehicle) {
             require(camera == "0" && vehicle == "TestVehicle", "AirSim endpoint parameters changed");
-            return RpcCamera{};
+            std::lock_guard<std::mutex> lock(rpc_mutex);
+            RpcCamera result;
+            result.pose.orientation = toRpc(body_ned * camera_relative);
+            const auto position = tf2::quatRotate(body_ned, mount);
+            result.pose.position = {position.x(), position.y(), position.z()};
+            return result;
+        });
+        server.bind("simGetVehiclePose", [&](const std::string &vehicle) {
+            require(vehicle == "TestVehicle", "AirSim vehicle pose endpoint");
+            std::lock_guard<std::mutex> lock(rpc_mutex);
+            RpcPose result;
+            result.orientation = toRpc(body_ned);
+            return result;
+        });
+        server.bind("simSetCameraPose", [&](const std::string &camera, const RpcPose &pose, const std::string &vehicle) {
+            require(camera == "0" && vehicle == "TestVehicle", "AirSim camera control endpoint");
+            require(std::abs(pose.position.x_val - mount.x()) < 1e-6 &&
+                    std::abs(pose.position.y_val - mount.y()) < 1e-6 &&
+                    std::abs(pose.position.z_val - mount.z()) < 1e-6, "AirSim camera mount offset changed");
+            std::lock_guard<std::mutex> lock(rpc_mutex);
+            camera_relative = tf2::Quaternion(pose.orientation.x_val, pose.orientation.y_val,
+                                              pose.orientation.z_val, pose.orientation.w_val);
+            ++writes;
         });
         server.async_run(1);
         Capture capture;
@@ -370,6 +495,9 @@ namespace
         options.parameter_overrides({rclcpp::Parameter("airsim.enabled", true),
                                      rclcpp::Parameter("airsim.port", static_cast<int64_t>(server.port())),
                                      rclcpp::Parameter("airsim.vehicle_name", "TestVehicle"),
+                                     rclcpp::Parameter("gimbal.pitch_aim", 10.0),
+                                     rclcpp::Parameter("gimbal.pitch_max", 120.0),
+                                     rclcpp::Parameter("gimbal.pitch_hold", 12.0),
                                      rclcpp::Parameter("airsim.timeout", .2)});
         auto node = std::make_shared<rclcpp::Node>("gimbal_airsim_interface_test", options);
         node->declare_parameter<bool>("airsim.enabled", false);
@@ -394,6 +522,51 @@ namespace
         gimbal->updateVehicleState(vehicle(-M_PI / 6), 9.80665);
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
         check(2 * M_PI / 3);
+        {
+            std::lock_guard<std::mutex> lock(rpc_mutex);
+            body_ned.setRPY(.1, .15, .4);
+        }
+        gimbal->setMode(apm_bridge::GimbalMode::AIM);
+        std::this_thread::sleep_for(std::chrono::milliseconds(150));
+        {
+            std::lock_guard<std::mutex> lock(rpc_mutex);
+            const tf2::Quaternion desired(tf2::Vector3(0, 1, 0), 100 * M_PI / 180);
+            require(writes > 3 && std::abs(camera_relative.dot(desired)) > .999999,
+                    "AirSim AIM did not preserve body +Z plus pitch_aim beyond 90 degrees");
+        }
+        tf2::Quaternion camera_enu;
+        tf2::fromMsg(capture.last().orientation, camera_enu);
+        const double target_pitch = .4;
+        const double target_yaw = -.3;
+        const auto world_target = tf2::quatRotate(camera_enu, tf2::Vector3(
+            std::cos(target_pitch) * std::cos(target_yaw),
+            std::cos(target_pitch) * std::sin(target_yaw), -std::sin(target_pitch)));
+        gimbal->setMode(apm_bridge::GimbalMode::MISSION);
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+        double target_error_pitch = 0, target_error_yaw = 0;
+        while (std::chrono::steady_clock::now() < deadline)
+        {
+            tf2::fromMsg(capture.last().orientation, camera_enu);
+            const auto ray = tf2::quatRotate(camera_enu.inverse(), world_target);
+            target_error_pitch = std::atan2(-ray.z(), std::hypot(ray.x(), ray.y()));
+            target_error_yaw = std::atan2(ray.y(), ray.x());
+            gimbal->updateTargetLos({true, target_error_pitch, target_error_yaw, 0, 0});
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+        require(std::abs(target_error_pitch) < .03 && std::abs(target_error_yaw) < .03,
+                "AirSim MISSION did not center target independently of HORIZON pitch_hold");
+        gimbal->updateTargetLos({});
+        std::this_thread::sleep_for(std::chrono::milliseconds(1200));
+        const auto held = capture.last();
+        require(std::abs(held.angular_velocity.y) < .01 && std::abs(held.angular_velocity.z) < .01,
+                "AirSim invalid LOS did not stop tracking motion");
+        gimbal->setMode(apm_bridge::GimbalMode::HORIZON);
+        std::this_thread::sleep_for(std::chrono::milliseconds(150));
+        tf2::fromMsg(capture.last().orientation, camera_enu);
+        double roll, pitch, yaw;
+        tf2::Matrix3x3(camera_enu).getRPY(roll, pitch, yaw);
+        require(std::abs(roll) < 1e-6 && std::abs(pitch + 12 * M_PI / 180) < 1e-6,
+                "AirSim HORIZON does not hold world pitch");
         gimbal->stop();
         gimbal->stop();
         const auto stopped = capture.count();
@@ -403,8 +576,40 @@ namespace
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
         require(capture.count() > stopped, "AirSim backend did not restart");
         gimbal->stop();
+
+        Capture pole_capture;
+        options.parameter_overrides({rclcpp::Parameter("airsim.enabled", true),
+                                     rclcpp::Parameter("airsim.port", static_cast<int64_t>(server.port())),
+                                     rclcpp::Parameter("airsim.vehicle_name", "TestVehicle"),
+                                     rclcpp::Parameter("gimbal.model", "C20S"),
+                                     rclcpp::Parameter("gimbal.pitch_aim", 10.0),
+                                     rclcpp::Parameter("gimbal.pitch_max", 120.0),
+                                     rclcpp::Parameter("gimbal.pitch_hold", -7.0)});
+        auto pole_node = std::make_shared<rclcpp::Node>("gimbal_c20s_pole_test", options);
+        pole_node->declare_parameter<bool>("airsim.enabled", false);
+        auto pole_gimbal = apm_bridge::createGimbal(*pole_node,
+            [&](auto msg) { pole_capture.receive(std::move(msg)); });
+        pole_gimbal->setMode(apm_bridge::GimbalMode::AIM);
+        pole_gimbal->start();
+        std::this_thread::sleep_for(std::chrono::milliseconds(150));
+        tf2::Quaternion pole_camera;
+        tf2::fromMsg(pole_capture.last().orientation, pole_camera);
+        const auto pole_target = tf2::quatRotate(pole_camera, tf2::Vector3(std::cos(.2), 0, -std::sin(.2)));
+        pole_gimbal->setMode(apm_bridge::GimbalMode::MISSION);
+        const auto pole_deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(2500);
+        double pole_error = 0;
+        while (std::chrono::steady_clock::now() < pole_deadline)
+        {
+            tf2::fromMsg(pole_capture.last().orientation, pole_camera);
+            const auto ray = tf2::quatRotate(pole_camera.inverse(), pole_target);
+            pole_error = std::atan2(-ray.z(), std::hypot(ray.x(), ray.y()));
+            pole_gimbal->updateTargetLos({true, pole_error, 0, 0, 0});
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+        require(std::abs(pole_error) < .03, "C20S body-Z AIM falsely triggered inverted-roll protection");
+        pole_gimbal->stop();
         server.stop();
-        std::cout << "PASS: Gimbal AirSim lifecycle, ENU pose and heading-relative legacy fields\n";
+        std::cout << "PASS: Gimbal AirSim lifecycle, ENU pose, mount preservation and AIM/MISSION/HORIZON tracking\n";
     }
 #else
     void airsimBackend()
@@ -426,6 +631,7 @@ int main(int argc, char **argv)
     try
     {
         factoryDisabledAndErrors();
+        aimAndMissionLimits();
         strapdownBackend();
         hardwareBackend();
         airsimBackend();

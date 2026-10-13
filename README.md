@@ -2,7 +2,8 @@
 
 Hardware and AirSim SITL use **the same `CustomLinkVehicleNode` executable** and
 the same **custom Betaflight protocol**. No MSP is used by the SITL implementation.
-The existing hardware launch/configuration are unchanged.
+The existing hardware launch/link interfaces are preserved; actuated gimbals now
+share the AIM/MISSION/HORIZON state machine described below.
 
 ## Build and launch
 
@@ -33,7 +34,7 @@ AirSim BetaFlight adapter -- custom link --> node relay :5764
 ROS control / arm ---- CustomLinkVehicleNode -+-- custom link --> BF :5763
 ROS IMU / RC / state <------------------------+<-- telemetry ----+
 AirSim rotors <--------- mixer frame 0x13 ----+
-AirSim camera API :41451 ---- orientation only --> /fpv/gimbal
+AirSim camera API :41451 <--- camera pose control / orientation ---> /fpv/gimbal
 ```
 
 In AirSim's `settings.json`, set the BetaFlight vehicle's **`TcpPort` to 5764**,
@@ -69,7 +70,8 @@ select the camera/configuration.
 ## Gimbal abstraction
 
 `apm_bridge::Gimbal` defines the shared `start()`, `stop()` and
-`updateVehicleState(imu, gravity)` interface, with an orientation callback.
+`updateVehicleState(imu, gravity)`, `setMode(mode)` and `updateTargetLos(target)`
+interface, with an orientation callback.
 `xfrobot::GimbalControl` implements the serial backend and
 `custom_link_bridge::AirsimGimbal` implements the camera RPC backend.
 `apm_bridge::StrapdownGimbal` implements a camera with a fixed body-relative pitch.
@@ -80,8 +82,8 @@ fusion flags, polling timers or heading-composition details.
 
 The input is vehicle FLU-to-ENU orientation and body specific acceleration.
 All callbacks preserve camera FLU-to-ENU orientation, camera FLU rates and the
-legacy heading-relative Euler slots. Serial polling remains 100 Hz; AirSim
-camera polling remains approximately 50 Hz. Serial status logging and optional
+legacy heading-relative Euler slots. Serial communication stays above 50 Hz;
+AirSim polls with a 20 ms minimum delay plus RPC latency. Serial status logging and optional
 FRD/NEU UAV-data conversion live in the serial backend. Lifecycle stop is
 idempotent and cancels callbacks/joins workers before the node is destroyed.
 The hardware `run()`, `getOrientationFLU()` and command APIs remain available
@@ -90,6 +92,116 @@ for existing standalone callers and protocol tests.
 Only an explicitly disabled AirSim gimbal returns no object. Invalid backend configuration or missing
 AirSim SDK is an explicit error; serial-open failures are logged without
 publishing success-shaped gimbal data.
+
+### AIM / MISSION / HORIZON
+
+`CustomLinkVehicleNode` is the only camera controller and `/fpv/gimbal` publisher.
+Do not run the former Tracker camera-control worker alongside it. The current
+mode is published on `/fpv/gimbal_mode` (`std_msgs/msg/String`, transient-local).
+
+| Mode | Selection | Actuated camera behavior |
+| --- | --- | --- |
+| AIM | Disarmed/startup, manual aiming before a mission, or a new tracker `ON` | Vendor command 4, FPV angle control; camera +X aims toward body ROS FLU +Z (up), offset by `pitch_aim`, within joint limits. |
+| MISSION | `/fpv/mission_state=true` and FC OFFBOARD authorized | Center LOS pitch/yaw at zero using external feedback + compensated rate feedforward; command 4, LOCK + REAL_SPEED, with mechanical limits. |
+| HORIZON | Mission exit, tracker `OFF`, API manual request, or pilot takeover while airborne | Keep heading aligned with the body and pitch at `pitch_hold` above horizontal. Stabilize roll on models that have a roll motor. |
+
+HORIZON persists after takeover/exit until a new tracker `ON`, a new authorized
+mission, or disarming. A stale `mission_state=true` cannot resume an interrupted
+mission after a manual takeover/OFF; it must become false before a new mission.
+Losing a target **does not leave MISSION**: pitch/yaw tracking decelerates to
+zero and holds the current stabilized orientation. Missing/invalid/stale LOS is
+logged. Real hardware also stops MISSION rates and suppresses camera pose
+publication after 200 ms without valid gimbal feedback.
+
+For **both actuated backends**, `gimbal.pitch_aim` and `gimbal.pitch_hold` are
+startup settings in degrees, **positive nose-up**:
+
+- AIM requests body-relative pitch **`90 + pitch_aim`**. At offset zero, camera
+  +X is parallel to body FLU +Z (up); a positive offset tilts beyond +Z toward
+  the body's rear. It follows body motion and does not use `pitch_hold`.
+- MISSION always requests **zero pitch/yaw LOS error**, independent of both
+  offsets. Travel limits can prevent full centering; unavailable axes are not
+  commanded, and hardware rates cannot push farther outward at a limit.
+- HORIZON alone uses `pitch_hold`, relative to horizontal, exactly as before.
+
+**The existing default pitch travel is [-135,+40] degrees.** Consequently the
+default `pitch_aim=0` requests +90 but produces the reachable +40-degree AIM
+setpoint and logs a warning. Do not enlarge real mechanical limits without
+checking the device/drawing. `pitch_aim=-50` requests +40; `pitch_aim=-90`
+recovers the former body-forward AIM direction. To test exact +Z alignment in
+AirSim, use a simulation-only config with `pitch_max>=90` (and enough margin for
+the requested offset). Equal min/max retains the existing disabled-limit convention.
+
+AirSim AIM uses the explicit joint angles without folding pitch into ZYX's
+[-90,+90] branch. MISSION constraints use the vendor's yaw-roll-pitch joint order
+and choose the nearest feasible orientation; looking along body +Z no longer
+causes an Euler-angle flip or false single-axis roll-protection trigger.
+
+The fixed-mount strapdown convention below is unchanged; a physical fixed camera
+cannot implement these actuated modes.
+
+`gimbal.model` selects C20S (pitch), C40D (roll/pitch) or C200T (roll/pitch/yaw)
+in hardware **and AirSim**. Absent axes remain body-coupled; a pitch-only gimbal
+cannot correct a target's horizontal error. Both backends apply mechanical
+limits and C20S roll-protection hysteresis. Exact horizon hold can be unreachable
+at extreme body attitudes or mechanical limits. Mechanical/protection stops
+take priority over smoothing.
+
+MISSION parameters (same YAML keys on both backends):
+
+| Parameter | Default | Meaning |
+| --- | --- | --- |
+| `gimbal.tracking_gain` | 2.0 | Image-angle proportional gain, 1/s |
+| `gimbal.tracking_max_rate` | 30.0 | Per-axis limit, deg/s; also bounded by `max_angle_speed` |
+| `gimbal.tracking_max_accel` | 90.0 | Per-axis command slew limit, deg/s² |
+| `gimbal.tracking_filter_tau` | 0.15 | First-order commanded-rate filter, seconds |
+| `gimbal.los_timeout` | 0.3 | Maximum LOS sample age, including transport delay, seconds |
+
+The shared controller converts the spherical LOS derivatives through the
+camera-frame LOS Jacobian before filtering/slew-limiting feedback and feedforward
+together. Saturation scales the actuated rate vector uniformly to preserve its
+correction direction; absent axes cannot consume the rate budget. Spherical LOS
+derivatives are not directly assigned to gyro axes.
+Mode transitions reset its rate history. Rate/acceleration/filter parameters
+must be finite and positive; the tracking rate must not exceed 150 deg/s.
+
+**AirSim setup:** set the controlled camera's
+`"Gimbal": {"Stabilization": 0.0}` and restart the Play session. Otherwise
+Unreal's built-in stabilization competes with `simSetCameraPose`, including
+overriding AIM. The tracker example settings have been updated. Camera control
+uses `airsim.host/port/vehicle_name/camera_name`, preserves the camera's initial
+body-relative position, and converts world ENU/FLU commands to relative NED/FRD
+poses. Configure the tracker with matching endpoint/camera names.
+
+### Target LOS wire contract
+
+`/fpv/target_los` uses `geometry_msgs/msg/TwistStamped`:
+
+| Field | Meaning |
+| --- | --- |
+| `header.stamp` | Same projection timestamp as the paired `/fpv/target_bbox` |
+| `header.frame_id` | `camera_flu` if valid; empty on loss/invalid input |
+| `twist.linear.y` | LOS pitch, rad, positive down |
+| `twist.linear.z` | LOS yaw, rad, positive left |
+| `twist.angular.y` | Ego-compensated pitch-angle rate, rad/s |
+| `twist.angular.z` | Ego-compensated yaw-angle rate, rad/s |
+| `twist.linear.x`, `twist.angular.x` | Unused, zero |
+
+These are spherical **LOS angle derivatives**, not an IMU angular-velocity
+vector or translational velocity. Tracker removes camera/airframe **rotational**
+ego-motion by rotating the previous ray into the current camera frame before
+differentiating; vehicle translation remains part of relative target motion
+(range would be needed to remove it). Rate history is re-expressed in the new
+camera frame before filtering. The first observation, a KF reinitialization,
+or a gap over 0.3 s restarts the rate estimate at zero.
+
+Tracker uses the image response's capture-time camera orientation for KF
+updates, and newer fresh bridge camera poses for low-latency projection at
+the actual pose sample time. If bridge
+camera feedback is unavailable, it explicitly warns and publishes capture-time
+bbox/LOS rather than fabricating an identity camera pose. Image debug messages
+retain their capture timestamp. Bridge rejects wrong-frame, non-finite,
+expired, future-dated or out-of-order valid LOS samples.
 
 ### Fixed-pitch strapdown camera
 
@@ -107,9 +219,8 @@ ros2 launch apm_bridge custom_link.launch.py pitch_hold:=-20.0
 
 The hardware launch defaults to an empty gimbal port. The equivalent parameters
 are `airsim.enabled: false`, `gimbal_port: ""`, and `gimbal.pitch_hold: -20.0`.
-For the C-20S stabilized gimbal, the same parameter retains its existing
-locked-angle hold meaning (relative to the stabilization reference, not the
-vehicle). Hardware protocol direction/control behavior is unchanged.
+For an actuated gimbal, this parameter has the HORIZON-only meaning described
+above, not a body-relative mount angle. Vendor sign conventions are unchanged.
 The optional launch argument `pitch_hold` overrides this value only when set;
 otherwise the YAML value is preserved. `gimbal.fixed_pitch` / `fixed_pitch`
 have been removed; migrate them to `gimbal.pitch_hold` / `pitch_hold`.
@@ -332,3 +443,77 @@ Motor fitting achieved R2=0.9999806 with a maximum throttle residual of 0.001600
 Both AirSim-enabled and hardware-only builds passed; `colcon test` reported
 9 tests with zero failures. Flight control used only ROS/custom-link messages;
 AirSim ground-truth APIs were used solely for independent observation.
+
+## Moving-flight gimbal validation (2026-10-12, historical behavior)
+
+The measurements below predate the body-+Z AIM / zero-centered MISSION revision:
+they tested the former body-forward AIM and MISSION `pitch_hold` image offset.
+They are retained as historical evidence, not claimed as live validation of the
+revised defaults. The script now verifies the limited `90 + pitch_aim` AIM
+reference and zero-centered MISSION; its `--pitch-aim` defaults to **-90**
+explicitly so the existing ground target remains visible. For zero-offset
+upward AIM, supply an airborne/visible target; the script will not fabricate LOS
+for a target behind the camera.
+
+`test/airsim_gimbal_flight.py` owns a temporary SITL/bridge and clones the tuned
+EEPROM rather than changing the original. The live UE/Cosys-AirSim vehicle flies
+a continuous horizontal trajectory at approximately 3.5 m, using ROS body-rate
+and collective commands over custom-link only. No high-level AirSim flight
+control, synthetic FDM/IMU data, or vehicle pose teleportation is used.
+
+Prerequisites: an idle running BetaFlight Play session, camera 0 at 1536x960 /
+72-degree scene FOV with built-in stabilization disabled, a sourced ROS
+workspace, the Cosys-AirSim Python SDK, and free TCP ports 5761/5763/5764.
+The script uses isolated ROS domain **173** by default, waits for real 1-g
+sensor data before initializing its flight estimator, then lands and confirms
+disarming and restoration of its configured ground AIM reference before stopping
+its processes.
+
+```bash
+# From the apm_bridge package directory:
+source /opt/ros/jazzy/setup.bash
+source ../../install/setup.bash
+python3 test/airsim_gimbal_flight.py \
+  --binary /path/to/betaflight/obj/main/betaflight_SITL.elf \
+  --eeprom /path/to/betaflight/eeprom.bin \
+  --model C20S --pitch-aim -90.0 --pitch-hold 10.0 --output /tmp/gimbal-c20s-run
+# Repeat with --model C200T and a DIFFERENT output directory.
+```
+
+Both models passed the declared pose/tracking criteria while continuously moving
+(100% of evaluated samples above 0.2 m/s; median horizontal speeds 0.78-0.94 m/s;
+minimum height 3.29 m in the latest reported runs):
+
+| Measurement (P95, degrees) | C20S | C200T |
+| --- | ---: | ---: |
+| AIM camera/body orientation error | 0.184 | 0.075 |
+| MISSION LOS pitch error relative to +10-degree offset | 0.689 | 0.756 |
+| MISSION LOS yaw error | Not actuated | 1.833 |
+| HORIZON world pitch error relative to +10 degrees | 0.044 | 0.026 |
+
+Whole-stage MISSION camera pitch/yaw rate P99 values were 10.65/4.76 deg/s
+(C20S) and 16.85/21.83 deg/s (C200T). The controller's 30 deg/s per-axis command
+limit is covered by regression tests, but it is not an absolute bound on
+individual RPC pose-difference samples: the latest C200T run included one
+42.94 deg/s pitch sample over 27 ms. The same event averaged 30.00 deg/s over
+54 ms and 25.61 deg/s over 82 ms, consistent with discrete pose updates and
+asynchronous observation. Strict instantaneous rendered-motion limiting is
+therefore not certified by this test. `result.json`'s `passed` flag refers to
+the declared P95 pose/LOS and P99 rate criteria, not an absolute sample maximum.
+
+This exercise caught and fixed a missing spherical-LOS-to-body rate conversion.
+The off-center/roll-coupled Jacobian and absent-axis rate-budget cases now have
+regression tests. Both AirSim-enabled and hardware-only builds passed; the
+bridge's six test groups and the tracker's seven tests passed.
+
+The LOS source is the actual scene's **TargetDrone actor-origin reference
+point**, projected using live camera poses and the tracker's
+`TargetLosEstimator`. It is not the visible mesh's bbox centroid, and this test
+does **not** certify YOLO/NanoTrack acquisition or physical RC takeover. HORIZON
+is exercised by exiting MISSION without stopping aircraft motion.
+
+Each output directory contains `result.json`, timestamped `flight.csv`, cloned
+EEPROM/configuration, process logs, and actual `AIM.png`, `MISSION.png` and
+`HORIZON.png` frames. Yellow marks the image center; green marks the projected
+geometric reference (which need not coincide with the visible mesh centroid).
+The live-flight script is manual and is not run by `colcon test`.

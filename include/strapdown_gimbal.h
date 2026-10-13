@@ -15,6 +15,9 @@ namespace apm_bridge
         void start() override;
         void stop() override;
         void updateVehicleState(const sensor_msgs::msg::Imu &imu, double gravity) override;
+        // A physical fixed mount cannot actuate; its pose/rates remain vehicle-derived.
+        void setMode(GimbalMode) override {}
+        void updateTargetLos(const TargetLos &) override {}
 
     private:
         rclcpp::Node &node_;

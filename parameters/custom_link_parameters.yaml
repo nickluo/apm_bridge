@@ -52,14 +52,25 @@ custom_link_bridge:
 
     landed:
       airborne_altitude: 0.5
+      landing_altitude: 0.2
+      takeoff_confirm_time: 0.5
+      landing_confirm_time: 1.0
 
     # 留空使用固定俯仰角的捷联相机；非空使用 XFrobot 串口云台。
     gimbal_port: "/dev/ttyS10"
 
     gimbal:
-      # 共用俯仰角 (deg)：捷联时相对机身固定；C-20S 增稳时以锁定+角度控制保持期望角。
-      # 方向保持各后端原约定：捷联 FLU 正值低头/负值抬头；增稳按云台协议角度。
+      # 共用俯仰角 (deg)：捷联仍为机身固定角 (FLU 正值低头)。
+      # 真机/AirSim 增稳云台正值抬头，仅 HORIZON 使用；MISSION 以画面中心为目标。
       pitch_hold: 0.0
+      # AIM 相对机身俯仰期望为 90 + pitch_aim (deg)，对齐 ROS FLU +Z（向上）。
+      # 默认 +40 deg 上限会截断 +90 deg 期望；请按真实机械行程配置，不能盲目放大限位。
+      pitch_aim: -15.0
+      tracking_gain: 2.0
+      tracking_max_rate: 30.0 # deg/s.
+      tracking_max_accel: 90.0 # deg/s^2.
+      tracking_filter_tau: 0.15 # seconds.
+      los_timeout: 0.3 # seconds.
       # 云台机型: C20S (单轴) / C40D (卧式两轴) / C200T (三轴)，决定参与控制的轴。
       # 行程限位默认沿用三轴机现场调参数值，手册正文未给数值 (在图纸)，
       # 换机型后务必按图纸实测并用下列参数覆盖。
@@ -71,8 +82,8 @@ custom_link_bridge:
       # pitch_roll_speed_scale: 12.0
       # yaw_speed_scale: 10.0
       # max_angle_speed: 150.0
-      # ---- C-20S 单轴俯仰逻辑 (其余机型不使用) ----
-      # 常态: 锁定+角度控制保持期望俯仰角 (0=水平);
+      # ---- C-20S HORIZON 单轴俯仰逻辑 ----
+      # 锁定+角度控制保持期望俯仰角 (0=水平);
       # |IMU滚转角| > roll_hold_enter (大坡度/倒飞): 锁定+零速保持当前俯仰角,
       # 回落到 roll_hold_exit 以下恢复角度控制 (exit 设小于 enter 可构成迟滞)。
       roll_hold_enter: 75.0

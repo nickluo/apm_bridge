@@ -110,6 +110,50 @@ GimbalConfig GimbalConfig::defaultsFor(GimbalModel model)
     return cfg;
 }
 
+double GimbalAxisConfig::constrainDegrees(double angle) const
+{
+    if (!std::isfinite(angle) || !std::isfinite(min_deg) || !std::isfinite(max_deg) || min_deg > max_deg)
+        throw std::invalid_argument("Invalid gimbal joint angle or mechanical limits");
+    if (!present)
+        return 0.0;
+    return min_deg == max_deg ? angle : std::clamp(angle, double(min_deg), double(max_deg));
+}
+
+std::array<double, 3> GimbalConfig::aimTargetDegrees() const
+{
+    if (!std::isfinite(pitch_aim_deg) || std::abs(pitch_aim_deg) > 90)
+        throw std::invalid_argument("gimbal.pitch_aim must be within [-90,90] degrees, positive nose-up");
+    const std::array<double, 3> target = {roll.constrainDegrees(0),
+        pitch.constrainDegrees(90.0 + pitch_aim_deg), yaw.constrainDegrees(0)};
+    for (double value : target)
+        if (std::abs(value) > 327.67)
+            throw std::invalid_argument("AIM joint angle exceeds the vendor angle command range");
+    return target;
+}
+
+tf2::Quaternion GimbalConfig::constrainMissionOrientation(const tf2::Quaternion &relative) const
+{
+    // Physical joint order matches the vendor pose: yaw * roll * pitch.
+    // Unlike ZYX, ZXY has no pitch singularity at the new body-Z AIM reference.
+    const auto desired = relative.normalized();
+    const tf2::Matrix3x3 matrix(desired);
+    const double r = std::asin(std::clamp(matrix[2][1], -1.0, 1.0));
+    const bool singular = std::abs(std::cos(r)) < 1e-6;
+    const double p = singular ? 0.0 : std::atan2(-matrix[2][0], matrix[2][2]);
+    const double y = singular ? std::atan2(matrix[1][0], matrix[0][0]) :
+        std::atan2(-matrix[0][1], matrix[1][1]);
+    const auto wrap = [](double angle) { return std::atan2(std::sin(angle), std::cos(angle)); };
+    const auto limited = [this](double roll_angle, double pitch_angle, double yaw_angle) {
+        const double deg = 180.0 / M_PI;
+        return tf2::Quaternion(tf2::Vector3(0, 0, 1), -yaw.constrainDegrees(-yaw_angle * deg) / deg) *
+            tf2::Quaternion(tf2::Vector3(1, 0, 0), roll.constrainDegrees(roll_angle * deg) / deg) *
+            tf2::Quaternion(tf2::Vector3(0, 1, 0), -pitch.constrainDegrees(-pitch_angle * deg) / deg);
+    };
+    const auto first = limited(r, p, y);
+    const auto second = limited(r >= 0 ? M_PI - r : -M_PI - r, wrap(p + M_PI), wrap(y + M_PI));
+    return std::abs(desired.dot(second)) > std::abs(desired.dot(first)) + 1e-12 ? second : first;
+}
+
 GimbalConfig GimbalConfig::fromParameters(rclcpp::Node &node)
 {
     // 第一段: 机型名决定轴存在性与默认限位
@@ -132,9 +176,27 @@ GimbalConfig GimbalConfig::fromParameters(rclcpp::Node &node)
     cfg.pitch_roll_speed_scale = param_f("gimbal.pitch_roll_speed_scale", cfg.pitch_roll_speed_scale);
     cfg.yaw_speed_scale = param_f("gimbal.yaw_speed_scale", cfg.yaw_speed_scale);
     cfg.max_angle_speed = param_f("gimbal.max_angle_speed", cfg.max_angle_speed);
+    cfg.pitch_aim_deg = param_f("gimbal.pitch_aim", cfg.pitch_aim_deg);
     cfg.pitch_hold_deg = param_f("gimbal.pitch_hold", cfg.pitch_hold_deg);
     cfg.roll_hold_enter_deg = param_f("gimbal.roll_hold_enter", cfg.roll_hold_enter_deg);
     cfg.roll_hold_exit_deg = param_f("gimbal.roll_hold_exit", cfg.roll_hold_exit_deg);
+    cfg.tracking.gain = param_f("gimbal.tracking_gain", cfg.tracking.gain);
+    cfg.tracking.max_rate_dps = param_f("gimbal.tracking_max_rate", cfg.tracking.max_rate_dps);
+    cfg.tracking.max_accel_dps2 = param_f("gimbal.tracking_max_accel", cfg.tracking.max_accel_dps2);
+    cfg.tracking.filter_tau = param_f("gimbal.tracking_filter_tau", cfg.tracking.filter_tau);
+    cfg.tracking.los_timeout = param_f("gimbal.los_timeout", cfg.tracking.los_timeout);
+    cfg.tracking.validate();
+    if (!std::isfinite(cfg.pitch_hold_deg) || std::abs(cfg.pitch_hold_deg) > 90 ||
+        !std::isfinite(cfg.max_angle_speed) || cfg.max_angle_speed <= 0 ||
+        !std::isfinite(cfg.roll_hold_enter_deg) || !std::isfinite(cfg.roll_hold_exit_deg) ||
+        cfg.roll_hold_exit_deg < 0 || cfg.roll_hold_enter_deg < cfg.roll_hold_exit_deg)
+        throw std::invalid_argument("Invalid gimbal pitch hold, speed or roll protection thresholds");
+    for (const auto &axis : {cfg.roll, cfg.pitch, cfg.yaw})
+        if (!std::isfinite(axis.min_deg) || !std::isfinite(axis.max_deg) ||
+            axis.min_deg > axis.max_deg)
+            throw std::invalid_argument("Invalid gimbal mechanical limits");
+    cfg.tracking.max_rate_dps = std::min(cfg.tracking.max_rate_dps, double(cfg.max_angle_speed));
+    cfg.aimTargetDegrees();
 
     node.declare_parameter<bool>("gimbal.send_uav_data", cfg.send_uav_data);
     node.get_parameter("gimbal.send_uav_data", cfg.send_uav_data);
@@ -148,7 +210,8 @@ GimbalControl::GimbalControl(const std::string &port)
 }
 
 GimbalControl::GimbalControl(const std::string &port, const GimbalConfig &gimbal_cfg)
-    : port_name(port), cmd_trig_counter(0), is_open(false), running(false), cfg(gimbal_cfg)
+    : port_name(port), is_open(false), running(false), cfg(gimbal_cfg),
+      aim_target_degrees(cfg.aimTargetDegrees()), tracking_controller(cfg.tracking), cmd_trig_counter(0)
 {
     memset(ctrl_op_type, 0, sizeof(ctrl_op_type));
     memset(ctrl_op_value, 0, sizeof(ctrl_op_value));
@@ -165,6 +228,7 @@ GimbalControl::GimbalControl(const std::string &port, const GimbalConfig &gimbal
 
     memset(&last_response, 0, sizeof(Gbc2GcuPkt_t));
     memset(&last_status, 0, sizeof(GimbalStatus));
+    memset(euler_angles_FLU, 0, sizeof(euler_angles_FLU));
     open();
 }
 
@@ -325,13 +389,42 @@ void GimbalControl::run()
         }
 
         start_stop(true);
+        control_stamp = std::chrono::steady_clock::now();
+        {
+            std::lock_guard<std::mutex> lock(mtx);
+            last_status.rx_ok = false;
+            feedback_stamp = {};
+        }
         while (running.load())
         {
+            const auto now = std::chrono::steady_clock::now();
+            const double dt = std::clamp(std::chrono::duration<double>(now - control_stamp).count(), 1e-4, 0.1);
+            control_stamp = now;
+            const auto requested = mode.load();
+            if (requested != control_mode)
+            {
+                tracking_controller.reset();
+                control_mode = requested;
+                roll_hold_active = false;
+            }
+            ctrl_wk_mode = control_mode == apm_bridge::GimbalMode::AIM ? WK_MODE_FPV : WK_MODE_LOCK;
+            if (control_mode == apm_bridge::GimbalMode::AIM)
+                for (int i = 0; i < 3; ++i)
+                {
+                    ctrl_op_type[i] = OP_TYPE_ANGLE;
+                    ctrl_op_value[i] = static_cast<int16_t>(std::round(aim_target_degrees[i] * 100.0));
+                }
             // 尝试读取返回包
             if (readPacket())
             {
                 // ---- 控制律 (按机型门控; C-40D/C-200T 与原实现逐字节一致) ----
-                if (cfg.model == GimbalModel::C20S)
+                if (control_mode == apm_bridge::GimbalMode::MISSION)
+                    updateMissionControl(dt);
+                else if (control_mode == apm_bridge::GimbalMode::AIM)
+                {
+                    // The body-relative AIM command is independent of gimbal feedback.
+                }
+                else if (cfg.model == GimbalModel::C20S)
                 {
                     // C-20S 单轴逻辑: 俯仰轴由云台内置角度环闭环。
                     // 常态: 锁定+角度控制, 保持期望俯仰姿态角;
@@ -390,7 +483,7 @@ void GimbalControl::run()
                     // 俯仰轴: P 控制器驱动相机姿态角回水平
                     if (cfg.pitch.present)
                     {
-                        pitch_exp = -last_response.cam_angle[1] * 0.01f * cfg.pitch_roll_speed_scale;
+                        pitch_exp = (cfg.pitch_hold_deg - last_response.cam_angle[1] * 0.01f) * cfg.pitch_roll_speed_scale;
                         pitch_exp = std::clamp(pitch_exp, -cfg.max_angle_speed, cfg.max_angle_speed);
 
                         float mtr_pitch = last_response.mtr_angle[0] * 0.01f;
@@ -440,6 +533,8 @@ void GimbalControl::run()
 
                 {
                     std::lock_guard<std::mutex> lock(mtx);
+                    feedback_stamp = std::chrono::steady_clock::now();
+                    orientation_stamp = node ? node->now() : rclcpp::Clock().now();
                     euler_angles_FLU[0] =   last_response.cam_angle[0] * 0.01f;
                     euler_angles_FLU[1] = - last_response.cam_angle[1] * 0.01f;
                     // 无偏航电机 (C-20S/C-40D) 时相机偏航随载体, 编码器不存在
@@ -453,6 +548,8 @@ void GimbalControl::run()
             }
             else
             {
+                if (control_mode == apm_bridge::GimbalMode::MISSION)
+                    updateMissionControl(dt);
                 // 无法读取到包，保持当前期望值不变 (维持通信频率)
                 sendControlPacket();
             }
@@ -461,18 +558,86 @@ void GimbalControl::run()
     });
 }
 
+void GimbalControl::setMode(apm_bridge::GimbalMode requested)
+{
+    std::lock_guard<std::mutex> lock(cmd_mtx);
+    tracking_on = false;
+    const auto previous = mode.exchange(requested);
+    if (requested == apm_bridge::GimbalMode::AIM && previous != requested &&
+        std::abs(aim_target_degrees[1] - (90.0 + cfg.pitch_aim_deg)) > 1e-6)
+        RCLCPP_WARN(node ? node->get_logger() : rclcpp::get_logger("xfrobot_gimbal"),
+            "AIM requested %.2f deg relative pitch, limited to %.2f deg; body FLU +Z is not reachable with this offset/limit",
+            90.0 + cfg.pitch_aim_deg, aim_target_degrees[1]);
+}
+
+void GimbalControl::updateTargetLos(const apm_bridge::TargetLos &target)
+{
+    tracking_controller.update(target);
+}
+
+void GimbalControl::updateMissionControl(double dt)
+{
+    const double roll = std::abs(last_response.cam_angle[0] * 0.01);
+    if (!roll_hold_active && roll > cfg.roll_hold_enter_deg)
+        roll_hold_active = true;
+    else if (roll_hold_active && roll < cfg.roll_hold_exit_deg)
+        roll_hold_active = false;
+    const bool no_feedback = std::chrono::steady_clock::now() - feedback_stamp >
+        std::chrono::milliseconds(UAV_DATA_TIMEOUT_MS);
+    const bool protection = cfg.model == GimbalModel::C20S && roll_hold_active;
+    if (no_feedback || protection)
+    {
+        tracking_controller.reset();
+        for (int i = 0; i < 3; ++i)
+        {
+            ctrl_op_type[i] = OP_TYPE_REAL_SPEED;
+            ctrl_op_value[i] = 0;
+        }
+        if (node)
+            RCLCPP_WARN_THROTTLE(node->get_logger(), *node->get_clock(), 2000,
+                "MISSION gimbal stopped: feedback missing/stale or single-axis roll protection");
+        return;
+    }
+    auto rates = tracking_controller.step(
+        cfg.roll.present ? -last_response.cam_angle[0] * 0.01 * M_PI / 180.0 : 0.0, dt,
+        apm_bridge::GimbalTrackingController::Clock::now(), {cfg.roll.present, cfg.pitch.present, cfg.yaw.present});
+    if (node && !tracking_controller.fresh())
+        RCLCPP_WARN_THROTTLE(node->get_logger(), *node->get_clock(), 2000,
+                             "MISSION gimbal: target LOS missing/stale; decelerating to locked hold");
+    const GimbalAxisConfig axes[3] = {cfg.roll, cfg.pitch, cfg.yaw};
+    const int encoder[3] = {1, 0, 2};
+    const double signs[3] = {1.0, -1.0, -1.0}; // FLU -> vendor roll / nose-up pitch / clockwise yaw.
+    for (int i = 0; i < 3; ++i)
+    {
+        double speed = rates[i] * signs[i] * 180.0 / M_PI;
+        const double angle = last_response.mtr_angle[encoder[i]] * 0.01;
+        if (!axes[i].present || protection ||
+            (axes[i].min_deg < axes[i].max_deg &&
+             ((angle <= axes[i].min_deg && speed < 0) || (angle >= axes[i].max_deg && speed > 0))))
+            speed = 0;
+        speed = std::clamp(speed, -double(cfg.max_angle_speed), double(cfg.max_angle_speed));
+        ctrl_op_type[i] = OP_TYPE_REAL_SPEED;
+        ctrl_op_value[i] = static_cast<int16_t>(std::round(speed * 10.0));
+    }
+}
+
 sensor_msgs::msg::Imu::UniquePtr GimbalControl::getOrientationFLU()
 {
     // 锁内拷贝局部量, 避免锁外再读共享数组
     float euler[3], omega[3];
+    rclcpp::Time stamp{0, 0, RCL_ROS_TIME};
     {
         std::lock_guard<std::mutex> lock(mtx);
+        if (!last_status.rx_ok || std::chrono::steady_clock::now() - feedback_stamp >
+            std::chrono::milliseconds(UAV_DATA_TIMEOUT_MS))
+            return nullptr;
         euler[0] = euler_angles_FLU[0];
         euler[1] = euler_angles_FLU[1];
         euler[2] = euler_angles_FLU[2];
         omega[0] = ema_filter[0];
         omega[1] = ema_filter[1];
         omega[2] = ema_filter[2];
+        stamp = orientation_stamp;
     }
 
     // 1. 将角度从度转换为弧度 (半角)
@@ -496,7 +661,7 @@ sensor_msgs::msg::Imu::UniquePtr GimbalControl::getOrientationFLU()
     q.setZ(sp * cy * sr + cp * sy * cr);
 
     sensor_msgs::msg::Imu::UniquePtr imu_msg = std::make_unique<sensor_msgs::msg::Imu>();
-    imu_msg->header.stamp = rclcpp::Clock().now();
+    imu_msg->header.stamp = stamp;
     imu_msg->header.frame_id = "gimbal_link";
     imu_msg->orientation.x = q.x();
     imu_msg->orientation.y = q.y();
@@ -759,7 +924,7 @@ void GimbalControl::sendControlPacket()
     const bool manual = (one_shot < 0) && !tracking;
     for (int i = 0; i < 3; i++)
     {
-        packet.gbc[i].wk_mode = WK_MODE_LOCK;
+        packet.gbc[i].wk_mode = ctrl_wk_mode;
         packet.gbc[i].op_type = manual ? ctrl_op_type[i] : OP_TYPE_REAL_SPEED;
         packet.gbc[i].op_value = manual ? ctrl_op_value[i] : 0;
         packet.gbc[i].go_zero = (go_zero >> i) & 0x1;

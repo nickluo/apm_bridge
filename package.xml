@@ -12,6 +12,7 @@
   <depend>rclcpp</depend>
   <depend>std_msgs</depend>
   <depend>sensor_msgs</depend>
+  <depend>geometry_msgs</depend>
   <depend>tf2</depend>
   <depend>tf2_ros</depend>
   <depend>tf2_geometry_msgs</depend>
@@ -26,6 +27,10 @@
   <exec_depend>ament_index_python</exec_depend>
   <exec_depend>launch_ros</exec_depend>
   <test_depend>ament_cmake_pytest</test_depend>
+  <test_depend>airsim_tracker</test_depend>
+  <test_depend>vision_msgs</test_depend>
+  <test_depend>python3-opencv</test_depend>
+  <test_depend>python3-scipy</test_depend>
 
   <export>
     <build_type>ament_cmake</build_type>

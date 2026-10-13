@@ -14,6 +14,7 @@ find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
+find_package(geometry_msgs REQUIRED)
 find_package(tf2 REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
@@ -52,6 +53,7 @@ add_executable(custom_link_bridge_node
 target_link_libraries(custom_link_bridge_node
   rclcpp::rclcpp
   std_msgs::std_msgs
+  geometry_msgs::geometry_msgs
   tf2::tf2
   tf2_ros::tf2_ros
   tf2_geometry_msgs::tf2_geometry_msgs
@@ -106,8 +108,16 @@ install(PROGRAMS scripts/sitl_motor_calibration.py
 install(FILES scripts/sitl_support.py DESTINATION lib/${PROJECT_NAME})
 
 if(BUILD_TESTING)
+  add_executable(gimbal_tracking_test test/gimbal_tracking_test.cpp)
+  add_test(NAME gimbal_tracking_test COMMAND gimbal_tracking_test)
   find_package(ament_cmake_pytest REQUIRED)
   ament_add_pytest_test(sitl_bridge_test test/sitl_bridge_test.py)
+  ament_add_pytest_test(gimbal_node_test test/gimbal_node_test.py TIMEOUT 30)
+  set_tests_properties(gimbal_node_test PROPERTIES
+    ENVIRONMENT "APM_BRIDGE_TEST_BINARY=$<TARGET_FILE:custom_link_bridge_node>")
+  ament_add_pytest_test(gimbal_protocol_test test/gimbal_pysim_test.py TIMEOUT 45)
+  set_tests_properties(gimbal_protocol_test PROPERTIES
+    ENVIRONMENT "GIMBAL_SELFTEST=$<TARGET_FILE:gimbal_selftest>")
   add_executable(sitl_relay_test
     test/sitl_relay_test.cpp src/custom_link/sitl_transport.cpp
     src/custom_link/transport.cpp src/custom_link/client.cpp)

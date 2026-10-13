@@ -3,6 +3,7 @@
 #include <functional>
 #include <memory>
 #include <sensor_msgs/msg/imu.hpp>
+#include "gimbal_tracking.h"
 
 namespace rclcpp { class Node; }
 
@@ -21,6 +22,8 @@ namespace apm_bridge
         virtual void stop() = 0;
         // Vehicle FLU -> ENU orientation, body specific force (including gravity), m/s^2.
         virtual void updateVehicleState(const sensor_msgs::msg::Imu &imu, double gravity) = 0;
+        virtual void setMode(GimbalMode mode) = 0;
+        virtual void updateTargetLos(const TargetLos &target) = 0;
     };
 
     // nullptr means intentionally disabled. Invalid configuration throws.

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string>
+#include <array>
 #include <cstdint>
 #include <functional>
 #include <thread>
@@ -131,6 +132,8 @@ struct GimbalAxisConfig
     bool present = true;  // 该轴是否存在电机
     float min_deg = 0.0f; // 机械行程下限 (deg)
     float max_deg = 0.0f; // 机械行程上限 (deg)
+
+    double constrainDegrees(double angle) const;
 };
 
 /**
@@ -147,14 +150,19 @@ struct GimbalConfig
     float pitch_roll_speed_scale = 12.0f; // 俯仰/滚转速度控制比例系数
     float yaw_speed_scale = 10.0f;        // 偏航速度控制比例系数
     float max_angle_speed = 150.0f;       // 最大角速度 (deg/s)
+    apm_bridge::GimbalTrackingConfig tracking;
 
-    // ---- C-20S 单轴俯仰逻辑 (其余机型不使用) ----
-    // 常态: 锁定+角度控制, 保持期望俯仰姿态角 pitch_hold_deg (0=水平);
+    // AIM: camera +X aims toward body FLU +Z, with a nose-up pitch offset.
+    float pitch_aim_deg = 0.0f;
+
+    // HORIZON alone holds this angle above horizontal; MISSION centers LOS at zero.
+    // Positive values retain the vendor nose-up convention.
+    // C-20S HORIZON uses the built-in angle loop:
     // 云台 IMU 滚转角 |cam_angle[0]| > roll_hold_enter 时 (载机大坡度/倒飞,
     // 单轴无法维持水平且可能触发倾角保护): 切换锁定+真实角速度控制,
     // op_value=0 锁定当前俯仰角;
     // |滚转| < roll_hold_exit 后恢复角度控制 (可将 exit 设小于 enter 构成迟滞)
-    float pitch_hold_deg = 0.0f; // C-20S protocol angle: positive nose-up; preserve existing hardware convention.
+    float pitch_hold_deg = 0.0f;
     float roll_hold_enter_deg = 75.0f;
     float roll_hold_exit_deg = 75.0f;
 
@@ -177,9 +185,13 @@ struct GimbalConfig
      *       gimbal.yaw_min/yaw_max (deg),
      *       gimbal.pitch_roll_speed_scale, gimbal.yaw_speed_scale,
      *       gimbal.max_angle_speed, gimbal.send_uav_data,
-     *       gimbal.pitch_hold, gimbal.roll_hold_enter, gimbal.roll_hold_exit (仅 C-20S)
+     *       gimbal.pitch_aim, gimbal.pitch_hold, gimbal.roll_hold_enter, gimbal.roll_hold_exit,
+     *       gimbal.tracking_gain/tracking_max_rate/tracking_max_accel,
+     *       gimbal.tracking_filter_tau/los_timeout
      */
     static GimbalConfig fromParameters(rclcpp::Node &node);
+    std::array<double, 3> aimTargetDegrees() const;
+    tf2::Quaternion constrainMissionOrientation(const tf2::Quaternion &relative) const;
 };
 
 /**
@@ -218,6 +230,8 @@ public:
     void start() override;
     void stop() override;
     void updateVehicleState(const sensor_msgs::msg::Imu &imu, double gravity) override;
+    void setMode(apm_bridge::GimbalMode mode) override;
+    void updateTargetLos(const apm_bridge::TargetLos &target) override;
 
     bool is_running() const;
 
@@ -284,6 +298,14 @@ private:
     bool is_open;
     std::atomic_bool running;
     GimbalConfig cfg;
+    std::array<double, 3> aim_target_degrees;
+    apm_bridge::GimbalTrackingController tracking_controller;
+    std::atomic<apm_bridge::GimbalMode> mode{apm_bridge::GimbalMode::HORIZON};
+    apm_bridge::GimbalMode control_mode = apm_bridge::GimbalMode::HORIZON;
+    std::chrono::steady_clock::time_point control_stamp{};
+    std::chrono::steady_clock::time_point feedback_stamp{};
+    rclcpp::Time orientation_stamp{0, 0, RCL_ROS_TIME};
+    uint8_t ctrl_wk_mode = 1;
 
     // 发送相关
     uint8_t cmd_trig_counter;
@@ -340,6 +362,7 @@ private:
      * @brief 工作线程的主发送路径: 按命令槽/跟踪状态/当前控制速度打包发送
      */
     void sendControlPacket();
+    void updateMissionControl(double dt);
 
     /**
      * @brief 尝试读取并解析一个云台返回包

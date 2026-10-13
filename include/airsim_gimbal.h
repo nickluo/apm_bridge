@@ -16,6 +16,8 @@ namespace custom_link_bridge
         void start() override;
         void stop() override;
         void updateVehicleState(const sensor_msgs::msg::Imu &imu, double gravity) override;
+        void setMode(apm_bridge::GimbalMode mode) override;
+        void updateTargetLos(const apm_bridge::TargetLos &target) override;
 
     private:
         class Impl;

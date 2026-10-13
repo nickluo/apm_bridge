@@ -69,6 +69,9 @@ CustomLinkVehicleNode::CustomLinkVehicleNode()
 
     this->declare_parameter<double>("rc.control_timeout", 0.5);
     this->declare_parameter<double>("landed.airborne_altitude", 0.5);
+    this->declare_parameter<double>("landed.landing_altitude", 0.2);
+    this->declare_parameter<double>("landed.takeoff_confirm_time", 0.5);
+    this->declare_parameter<double>("landed.landing_confirm_time", 1.0);
 
     this->get_parameter("gravity_const", gravity);
     this->get_parameter("mass", mass);
@@ -101,6 +104,14 @@ CustomLinkVehicleNode::CustomLinkVehicleNode()
     this->get_parameter("imu.frame_id", imu_frame_id);
     this->get_parameter("rc.control_timeout", control_timeout);
     this->get_parameter("landed.airborne_altitude", airborne_altitude);
+    this->get_parameter("landed.landing_altitude", landing_altitude);
+    this->get_parameter("landed.takeoff_confirm_time", takeoff_confirm_time_s);
+    this->get_parameter("landed.landing_confirm_time", landing_confirm_time_s);
+    if (!std::isfinite(airborne_altitude) || !std::isfinite(landing_altitude) ||
+        !std::isfinite(takeoff_confirm_time_s) || !std::isfinite(landing_confirm_time_s) ||
+        airborne_altitude <= 0.0 || landing_altitude < 0.0 || landing_altitude >= airborne_altitude ||
+        takeoff_confirm_time_s <= 0.0 || landing_confirm_time_s <= 0.0)
+        throw std::invalid_argument("Invalid landed-state detection parameters");
     if (airsim_enabled && (voltage_compensation || baro_compensation))
         throw std::invalid_argument("AirSim SITL requires voltage_compensation=false and baro_compensation=false");
     if (airsim_enabled &&
@@ -145,6 +156,8 @@ CustomLinkVehicleNode::CustomLinkVehicleNode()
         "/fpv/temperature_baro", rclcpp::QoS(rclcpp::KeepLast(10)).best_effort());
     ap_feedback_pub = this->create_publisher<quadrotor_msgs::msg::LowLevelFeedback>("~/low_level_feedback", 10);
     gimbal_imu_pub = this->create_publisher<sensor_msgs::msg::Imu>("/fpv/gimbal", 10);
+    gimbal_mode_pub = this->create_publisher<std_msgs::msg::String>(
+        "/fpv/gimbal_mode", rclcpp::QoS(1).transient_local());
     trigger_pub = this->create_publisher<std_msgs::msg::Header>("/fpv/tracker_trigger", 10);
     altitude_pub = this->create_publisher<std_msgs::msg::Float64>("/fpv/altitude", rclcpp::SensorDataQoS());
     // GPS / 失效保护 (0x12 PayloadSlow, 10 Hz)：沿用 MAVROS 话题名，OSD 与
@@ -188,7 +201,63 @@ CustomLinkVehicleNode::CustomLinkVehicleNode()
         publisher->publish(std::move(msg));
     });
     if (gimbal)
+    {
+        gimbal->setMode(apm_bridge::GimbalMode::AIM);
         gimbal->start();
+    }
+    if (!this->has_parameter("gimbal.los_timeout"))
+        this->declare_parameter<double>("gimbal.los_timeout", 0.3);
+    target_los_sub = this->create_subscription<geometry_msgs::msg::TwistStamped>(
+        "/fpv/target_los", rclcpp::QoS(1).best_effort(),
+        [this](const geometry_msgs::msg::TwistStamped::SharedPtr msg) {
+            if (!gimbal)
+                return;
+            apm_bridge::TargetLos target;
+            const auto &angles = msg->twist.linear;
+            const auto &rates = msg->twist.angular;
+            const int64_t stamp = rclcpp::Time(msg->header.stamp).nanoseconds();
+            const int64_t now = this->now().nanoseconds();
+            if (now < last_los_clock)
+            {
+                last_los_stamp = 0;
+                RCLCPP_WARN(this->get_logger(), "ROS clock moved backwards; resetting target LOS sequence");
+            }
+            last_los_clock = now;
+            const double age = (now - stamp) * 1e-9;
+            target.valid = msg->header.frame_id == "camera_flu" &&
+                std::isfinite(angles.y) && std::isfinite(angles.z) &&
+                std::isfinite(rates.y) && std::isfinite(rates.z) &&
+                std::abs(angles.y) < M_PI_2 - 1e-6 && std::abs(angles.z) < M_PI_2 - 1e-6 &&
+                age >= 0 && age <= this->get_parameter("gimbal.los_timeout").as_double() &&
+                stamp > last_los_stamp;
+            if (target.valid)
+            {
+                last_los_stamp = stamp;
+                target.pitch = angles.y;
+                target.yaw = angles.z;
+                target.pitch_rate = rates.y;
+                target.yaw_rate = rates.z;
+                target.age = age;
+            }
+            else
+            {
+                if (!msg->header.frame_id.empty())
+                    RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                        "Rejecting target LOS: invalid frame, values, stale or non-increasing timestamp");
+            }
+            gimbal->updateTargetLos(target);
+        });
+    gimbal_trigger_sub = this->create_subscription<std_msgs::msg::Header>(
+        "/fpv/tracker_trigger", 10, [this](const std_msgs::msg::Header::SharedPtr msg) {
+            if (msg->frame_id == "ON")
+                gimbal_aim_requested = true;
+            else if (msg->frame_id == "OFF")
+                gimbal_abort_requested = true;
+        });
+    std_msgs::msg::String initial_mode;
+    initial_mode.data = "AIM";
+    gimbal_mode_pub->publish(initial_mode);
+    gimbal_mode_timer = this->create_wall_timer(20ms, [this]() { updateGimbalMode(); });
 
     // ---------------- 链路 ----------------
     using custom_link::Client;
@@ -429,6 +498,15 @@ void CustomLinkVehicleNode::handleMedium(const custom_link::protocol::PayloadMed
     {
         altitude_m.store(alt);
     }
+    const double relative_altitude = altitude_m.load();
+    if (previous_altitude_us != 0 && hostUs > previous_altitude_us) {
+        const double dt = static_cast<double>(hostUs - previous_altitude_us) * 1.0e-6;
+        const double velocity = (relative_altitude - previous_altitude_m) / dt;
+        if (std::isfinite(velocity) && dt <= 1.0)
+            vertical_velocity_mps.store(std::clamp(velocity, -10.0, 10.0));
+    }
+    previous_altitude_m = relative_altitude;
+    previous_altitude_us = hostUs;
     std_msgs::msg::Float64 altitude;
     altitude.data = alt;
     altitude_pub->publish(altitude);
@@ -650,17 +728,52 @@ void CustomLinkVehicleNode::publishState(uint32_t mode_flags, bool is_armed)
     rc_manual.store(!offboard);
 
     const double alt = altitude_m.load();
-    if (!is_armed)
-        landed_state.store(mavros_msgs::msg::ExtendedState::LANDED_STATE_ON_GROUND);
-    else if (airsim_enabled && !sitl_ground_valid)
+    const double vertical_velocity = vertical_velocity_mps.load();
+    const auto now_us = std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    const uint8_t in_air = mavros_msgs::msg::ExtendedState::LANDED_STATE_IN_AIR;
+    const uint8_t on_ground = mavros_msgs::msg::ExtendedState::LANDED_STATE_ON_GROUND;
+
+    if (airsim_enabled && !sitl_ground_valid)
     {
         landed_state.store(mavros_msgs::msg::ExtendedState::LANDED_STATE_UNDEFINED);
+        landed_candidate_state = mavros_msgs::msg::ExtendedState::LANDED_STATE_UNDEFINED;
+        landed_candidate_since_us = 0;
         RCLCPP_WARN_ONCE(this->get_logger(), "SITL ground reference unavailable; landed state is undefined");
     }
+    else if (!is_armed)
+    {
+        landed_state.store(on_ground);
+        landed_candidate_state = on_ground;
+        landed_candidate_since_us = 0;
+    }
     else
-        landed_state.store(alt > airborne_altitude
-                               ? mavros_msgs::msg::ExtendedState::LANDED_STATE_IN_AIR
-                               : mavros_msgs::msg::ExtendedState::LANDED_STATE_ON_GROUND);
+    {
+        uint8_t candidate = mavros_msgs::msg::ExtendedState::LANDED_STATE_UNDEFINED;
+        if (landed_state.load() == in_air) {
+            if (alt <= landing_altitude && std::abs(vertical_velocity) <= 0.35)
+                candidate = on_ground;
+        }
+        else if (alt <= landing_altitude && std::abs(vertical_velocity) <= 0.35) {
+            candidate = on_ground;
+        }
+        else if (alt >= airborne_altitude &&
+                 (vertical_velocity >= 0.05 || alt >= airborne_altitude + 0.2)) {
+            candidate = in_air;
+        }
+
+        if (candidate != landed_candidate_state) {
+            landed_candidate_state = candidate;
+            landed_candidate_since_us = candidate == mavros_msgs::msg::ExtendedState::LANDED_STATE_UNDEFINED
+                ? 0 : now_us;
+        }
+        if (candidate != mavros_msgs::msg::ExtendedState::LANDED_STATE_UNDEFINED &&
+            landed_candidate_since_us != 0) {
+            const double confirmation_s = candidate == in_air ? takeoff_confirm_time_s : landing_confirm_time_s;
+            if (now_us - landed_candidate_since_us >= static_cast<int64_t>(confirmation_s * 1.0e6))
+                landed_state.store(candidate);
+        }
+    }
 
     mavros_msgs::msg::State state;
     state.header.stamp = this->now();
@@ -742,6 +855,23 @@ void CustomLinkVehicleNode::pushControl()
     client->setControl(input, fresh);
 }
 
+void CustomLinkVehicleNode::updateGimbalMode()
+{
+    const auto next = gimbal_mode_selector.update(armed.load(),
+        landed_state.load() == mavros_msgs::msg::ExtendedState::LANDED_STATE_IN_AIR,
+        in_mission.load(), rc_manual.load(),
+        gimbal_aim_requested.exchange(false), gimbal_abort_requested.exchange(false));
+    if (next == gimbal_mode)
+        return;
+    gimbal_mode = next;
+    if (gimbal)
+        gimbal->setMode(next);
+    std_msgs::msg::String msg;
+    msg.data = apm_bridge::gimbalModeName(next);
+    gimbal_mode_pub->publish(msg);
+    RCLCPP_INFO(this->get_logger(), "Gimbal mode -> %s", msg.data.c_str());
+}
+
 
 void CustomLinkVehicleNode::ctrlCommandCallback(const quadrotor_msgs::msg::ControlCommand::SharedPtr command)
 {
@@ -813,6 +943,8 @@ void CustomLinkVehicleNode::armCallback(const std_msgs::msg::Bool::SharedPtr msg
 
 void CustomLinkVehicleNode::offboardCallback(const std_msgs::msg::Bool::SharedPtr msg)
 {
+    if (!msg->data)
+        gimbal_abort_requested = true;
     client->setOffboardRequest(msg->data);
     RCLCPP_INFO(this->get_logger(), "Requested custom-link mode: %s",
                 msg->data ? "OFFBOARD" : "MANUAL");

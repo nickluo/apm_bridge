@@ -6,6 +6,8 @@
 #include <std_msgs/msg/header.hpp>
 #include <std_msgs/msg/int8.hpp>
 #include <std_msgs/msg/float64.hpp>
+#include <std_msgs/msg/string.hpp>
+#include <geometry_msgs/msg/twist_stamped.hpp>
 #include "quadrotor_msgs/msg/control_command.hpp"
 #include "quadrotor_msgs/msg/low_level_feedback.hpp"
 #include <mavros_msgs/msg/extended_state.hpp>
@@ -88,6 +90,7 @@ namespace custom_link_bridge
         rclcpp::Publisher<sensor_msgs::msg::Temperature>::SharedPtr temperature_pub;
         rclcpp::Publisher<quadrotor_msgs::msg::LowLevelFeedback>::SharedPtr ap_feedback_pub;
         rclcpp::Publisher<sensor_msgs::msg::Imu>::SharedPtr gimbal_imu_pub;
+        rclcpp::Publisher<std_msgs::msg::String>::SharedPtr gimbal_mode_pub;
         rclcpp::Publisher<std_msgs::msg::Header>::SharedPtr trigger_pub;
         rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr altitude_pub;
         // GPS / mAh / 失效保护 (0x12 PayloadSlow 携带，10 Hz)
@@ -102,12 +105,21 @@ namespace custom_link_bridge
         rclcpp::Subscription<std_msgs::msg::Int8>::SharedPtr tracker_state_sub;
         rclcpp::Subscription<std_msgs::msg::Int8>::SharedPtr radar_state_sub;
         rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr mission_state_sub;
+        rclcpp::Subscription<geometry_msgs::msg::TwistStamped>::SharedPtr target_los_sub;
+        rclcpp::Subscription<std_msgs::msg::Header>::SharedPtr gimbal_trigger_sub;
+        rclcpp::TimerBase::SharedPtr gimbal_mode_timer;
+        apm_bridge::GimbalModeSelector gimbal_mode_selector;
+        apm_bridge::GimbalMode gimbal_mode = apm_bridge::GimbalMode::AIM;
+        std::atomic_bool gimbal_aim_requested{false}, gimbal_abort_requested{false};
+        int64_t last_los_stamp = 0;
+        int64_t last_los_clock = 0;
 
         rclcpp::TimerBase::SharedPtr diag_timer;
         rclcpp::TimerBase::SharedPtr cmd_push_timer;
 
         /// 按 link.control_rate 把最新控制量（含新鲜度判定）推给链路客户端。
         void pushControl();
+        void updateGimbalMode();
 
         void ctrlCommandCallback(const quadrotor_msgs::msg::ControlCommand::SharedPtr command);
         void ctrlCommandRawCallback(const quadrotor_msgs::msg::ControlCommand::SharedPtr command);
@@ -171,10 +183,18 @@ namespace custom_link_bridge
         std::atomic_bool radar_tracking{false};
         std::atomic_bool in_mission{false};
         std::atomic<double> altitude_m{0.0};
+        std::atomic<double> vertical_velocity_mps{0.0};
         apm_bridge::EMAFilter<double, 1> sitl_altitude_ema{20};
         double sitl_ground_altitude = 0.0;
         bool sitl_ground_valid = false;
         bool armed_feedback_valid = false;
+        double previous_altitude_m = 0.0;
+        int64_t previous_altitude_us = 0;
+        double landing_altitude = 0.2;
+        double takeoff_confirm_time_s = 0.5;
+        double landing_confirm_time_s = 1.0;
+        uint8_t landed_candidate_state = mavros_msgs::msg::ExtendedState::LANDED_STATE_UNDEFINED;
+        int64_t landed_candidate_since_us = 0;
 
         std::atomic_bool in_hover{false};
         std::atomic_bool use_rate{false};
