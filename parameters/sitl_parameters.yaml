@@ -9,7 +9,8 @@ custom_link_bridge:
     gimbal_port: ""
     gimbal:
       model: "C20S"
-      pitch_aim: -15.0 # AIM requests 90 + this offset (deg), toward body FLU +Z; joint limits still apply.
+      pitch_aim: -10.0 # AIM is 80 deg relative to the launcher-mounted body.
+      pitch_max: 85.0 # Virtual SITL joint only; hardware model defaults remain unchanged.
       pitch_hold: 0.0 # HORIZON alone: positive nose-up, degrees. MISSION centers LOS at zero.
       tracking_gain: 2.0
       tracking_max_rate: 30.0 # deg/s, per actuated axis.
@@ -29,7 +30,7 @@ custom_link_bridge:
       C: 0.011891350984191815
       D: -0.059949564628813956
       n: 1
-      thrust_limit: 0.5
+      thrust_limit: 0.9
       spin_k: 0.0
 
     airsim:

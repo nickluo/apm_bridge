@@ -33,6 +33,7 @@ namespace apm_bridge
     struct GimbalTrackingConfig
     {
         double gain = 2.0;
+        double rate_feedforward = 1.0;
         double max_rate_dps = 30.0;
         double max_accel_dps2 = 90.0;
         double filter_tau = 0.15;
@@ -41,6 +42,7 @@ namespace apm_bridge
         void validate() const
         {
             if (!std::isfinite(gain) || gain <= 0 ||
+                !std::isfinite(rate_feedforward) || rate_feedforward < 0 ||
                 !std::isfinite(max_rate_dps) || max_rate_dps <= 0 || max_rate_dps > 150 ||
                 !std::isfinite(max_accel_dps2) || max_accel_dps2 <= 0 ||
                 !std::isfinite(filter_tau) || filter_tau <= 0 ||
@@ -93,8 +95,8 @@ namespace apm_bridge
             const bool valid = freshLocked(now);
             std::array<double, 3> desired = {
                 axes[0] ? cfg_.gain * roll_error : 0.0,
-                valid ? target_.pitch_rate + cfg_.gain * target_.pitch : 0.0,
-                valid ? target_.yaw_rate + cfg_.gain * target_.yaw : 0.0};
+                valid ? cfg_.rate_feedforward * target_.pitch_rate + cfg_.gain * target_.pitch : 0.0,
+                valid ? cfg_.rate_feedforward * target_.yaw_rate + cfg_.gain * target_.yaw : 0.0};
             const double limit = cfg_.max_rate_dps * M_PI / 180.0;
             if (valid)
             {

@@ -156,6 +156,7 @@ namespace custom_link_bridge
 
         std::unique_ptr<custom_link::Client> client;
         bool airsim_enabled = false;
+        bool mission_gimbal_on_ground = false;
 
         // ---- 共享状态 ----
         std::mutex mtx_kp;

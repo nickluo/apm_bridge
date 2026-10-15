@@ -194,6 +194,7 @@ namespace custom_link_bridge
             rpc::client client(host_, static_cast<uint16_t>(port_));
             client.set_timeout(static_cast<int64_t>(timeout_ * 1000));
             std::optional<tf2::Quaternion> previous;
+            std::optional<tf2::Quaternion> mission_world;
             double last_sample_time = 0;
             double last_control_time = node_.now().seconds();
             std::optional<tf2::Vector3> mount_position;
@@ -221,6 +222,7 @@ namespace custom_link_bridge
                     if (mode != previous_mode)
                     {
                         tracking_.reset();
+                        mission_world.reset();
                         previous_mode = mode;
                         roll_hold_active_ = false;
                     }
@@ -241,6 +243,8 @@ namespace custom_link_bridge
                         relative = body.inverse() * (protection ? enu : horizonOrientation(body));
                     else if (mode == apm_bridge::GimbalMode::MISSION)
                     {
+                        if (!mission_world)
+                            mission_world = enu;
                         std::array<double, 3> rates{};
                         if (dt > 0 && !protection)
                             rates = tracking_.step(cfg_.roll.present ? -bank : 0.0, dt,
@@ -256,10 +260,13 @@ namespace custom_link_bridge
                         const double speed = omega.length();
                         const tf2::Quaternion delta = speed > 1e-9 ?
                             tf2::Quaternion(omega / speed, speed * dt) : tf2::Quaternion(0, 0, 0, 1);
-                        relative = body.inverse() * enu * delta;
+                        relative = body.inverse() * *mission_world * delta;
                     }
                     if (mode == apm_bridge::GimbalMode::MISSION)
+                    {
                         relative = cfg_.constrainMissionOrientation(relative);
+                        mission_world = body * relative;
+                    }
                     else if (mode == apm_bridge::GimbalMode::HORIZON)
                         relative = limitRelative(relative);
                     const auto frd = enuRelativeToFrd(relative);

@@ -186,7 +186,7 @@ struct GimbalConfig
      *       gimbal.pitch_roll_speed_scale, gimbal.yaw_speed_scale,
      *       gimbal.max_angle_speed, gimbal.send_uav_data,
      *       gimbal.pitch_aim, gimbal.pitch_hold, gimbal.roll_hold_enter, gimbal.roll_hold_exit,
-     *       gimbal.tracking_gain/tracking_max_rate/tracking_max_accel,
+     *       gimbal.tracking_gain/tracking_rate_feedforward/tracking_max_rate/tracking_max_accel,
      *       gimbal.tracking_filter_tau/los_timeout
      */
     static GimbalConfig fromParameters(rclcpp::Node &node);

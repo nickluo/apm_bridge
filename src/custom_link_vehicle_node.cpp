@@ -197,6 +197,7 @@ CustomLinkVehicleNode::CustomLinkVehicleNode()
             in_mission = msg->data;
         });
 
+    mission_gimbal_on_ground = this->declare_parameter<bool>("gimbal.mission_on_ground", false);
     gimbal = apm_bridge::createGimbal(*this, [publisher = gimbal_imu_pub](auto msg) {
         publisher->publish(std::move(msg));
     });
@@ -858,7 +859,8 @@ void CustomLinkVehicleNode::pushControl()
 void CustomLinkVehicleNode::updateGimbalMode()
 {
     const auto next = gimbal_mode_selector.update(armed.load(),
-        landed_state.load() == mavros_msgs::msg::ExtendedState::LANDED_STATE_IN_AIR,
+        landed_state.load() == mavros_msgs::msg::ExtendedState::LANDED_STATE_IN_AIR ||
+            (mission_gimbal_on_ground && in_mission.load()),
         in_mission.load(), rc_manual.load(),
         gimbal_aim_requested.exchange(false), gimbal_abort_requested.exchange(false));
     if (next == gimbal_mode)

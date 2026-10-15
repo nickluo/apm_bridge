@@ -102,6 +102,26 @@ namespace
         require(rate[0] == 0 && rate[2] == 0 && std::abs(rate[1] * std::cos(.55) - .4) < 1e-8,
                 "absent yaw motor incorrectly limited single-axis pitch tracking");
     }
+
+    void noisyRateFeedforward()
+    {
+        apm_bridge::GimbalTrackingConfig config;
+        config.rate_feedforward = 0;
+        apm_bridge::GimbalTrackingController controller(config);
+        const auto now = apm_bridge::GimbalTrackingController::Clock::now();
+        controller.update({true, 0, 0, 10, -10}, now);
+        auto output = controller.step(0, .02, now);
+        require(output[1] == 0 && output[2] == 0, "disabled noisy rate feedforward moved a centered camera");
+        controller.update({true, .1, -.1, -10, 10}, now);
+        for (int i = 0; i < 200; ++i)
+            output = controller.step(0, .02, now);
+        require(output[1] > 0 && output[2] < 0, "disabling feedforward removed angle tracking");
+        config.rate_feedforward = -1;
+        bool rejected = false;
+        try { apm_bridge::GimbalTrackingController invalid(config); }
+        catch (const std::invalid_argument &) { rejected = true; }
+        require(rejected, "negative rate feedforward accepted");
+    }
 }
 
 int main()
@@ -111,6 +131,7 @@ int main()
         modes();
         rates();
         sphericalRateMapping();
+        noisyRateFeedforward();
         std::cout << "PASS: gimbal states, zero-centered MISSION, feedforward, timeout, filtering and rate limits\n";
         return 0;
     }

@@ -155,6 +155,7 @@ MISSION parameters (same YAML keys on both backends):
 | `gimbal.tracking_max_rate` | 30.0 | Per-axis limit, deg/s; also bounded by `max_angle_speed` |
 | `gimbal.tracking_max_accel` | 90.0 | Per-axis command slew limit, deg/s² |
 | `gimbal.tracking_filter_tau` | 0.15 | First-order commanded-rate filter, seconds |
+| `gimbal.tracking_rate_feedforward` | 1.0 | Gain on ego-compensated LOS angular-rate feedforward; 0 retains angle feedback only for noisy rendered-camera tracking |
 | `gimbal.los_timeout` | 0.3 | Maximum LOS sample age, including transport delay, seconds |
 
 The shared controller converts the spherical LOS derivatives through the

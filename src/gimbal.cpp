@@ -181,6 +181,7 @@ GimbalConfig GimbalConfig::fromParameters(rclcpp::Node &node)
     cfg.roll_hold_enter_deg = param_f("gimbal.roll_hold_enter", cfg.roll_hold_enter_deg);
     cfg.roll_hold_exit_deg = param_f("gimbal.roll_hold_exit", cfg.roll_hold_exit_deg);
     cfg.tracking.gain = param_f("gimbal.tracking_gain", cfg.tracking.gain);
+    cfg.tracking.rate_feedforward = param_f("gimbal.tracking_rate_feedforward", cfg.tracking.rate_feedforward);
     cfg.tracking.max_rate_dps = param_f("gimbal.tracking_max_rate", cfg.tracking.max_rate_dps);
     cfg.tracking.max_accel_dps2 = param_f("gimbal.tracking_max_accel", cfg.tracking.max_accel_dps2);
     cfg.tracking.filter_tau = param_f("gimbal.tracking_filter_tau", cfg.tracking.filter_tau);
