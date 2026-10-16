@@ -193,8 +193,13 @@ CustomLinkVehicleNode::CustomLinkVehicleNode()
         });
     mission_state_sub = this->create_subscription<std_msgs::msg::Bool>(
         "/fpv/mission_state", 1,
-        [&](const std_msgs::msg::Bool::SharedPtr msg) {
-            in_mission = msg->data;
+        [this](const std_msgs::msg::Bool::SharedPtr msg) {
+            // 拦截器结束任务（True→False）同样联动退出 OFFBOARD（与 OFF 触发帧双保险）。
+            if (in_mission.exchange(msg->data) && !msg->data && client)
+            {
+                client->setOffboardRequest(false);
+                RCLCPP_INFO(this->get_logger(), "Mission ended: requesting custom-link MANUAL");
+            }
         });
 
     mission_gimbal_on_ground = this->declare_parameter<bool>("gimbal.mission_on_ground", false);
@@ -253,7 +258,25 @@ CustomLinkVehicleNode::CustomLinkVehicleNode()
             if (msg->frame_id == "ON")
                 gimbal_aim_requested = true;
             else if (msg->frame_id == "OFF")
+            {
                 gimbal_abort_requested = true;
+                // 退出 MISSION 联动：退出 OFFBOARD（modeReq=0），杆量权限即刻交还飞手。
+                if (client)
+                {
+                    client->setOffboardRequest(false);
+                    RCLCPP_INFO(this->get_logger(), "Tracker OFF: requesting custom-link MANUAL");
+                }
+            }
+            else if (msg->frame_id == "MISSION")
+            {
+                // 进入 MISSION 联动：请求飞控进入 OFFBOARD（modeReq=2，HOST_CONTROL
+                // 帧随控制流携带），拦截弹控制帧即刻获得权限，不再依赖 AUX2 开关。
+                if (client)
+                {
+                    client->setOffboardRequest(true);
+                    RCLCPP_INFO(this->get_logger(), "MISSION: requesting custom-link OFFBOARD");
+                }
+            }
         });
     std_msgs::msg::String initial_mode;
     initial_mode.data = "AIM";
