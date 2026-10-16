@@ -561,9 +561,23 @@ void CustomLinkVehicleNode::handleSlow(const custom_link::protocol::PayloadSlow 
     }
 
     const bool now_armed = (p.status & custom_link::protocol::STATUS_ARMED) != 0;
-    armed.store(now_armed);
+    const bool was_armed = armed.exchange(now_armed);
     armed_feedback_valid = true;
     client->setArmedFeedback(now_armed);
+
+    // 起桨/落桨边沿驱动下游：从未起桨到起桨发布 ON 触发 Tracker，从起桨到
+    // 未起桨发布 OFF 停止 Tracker 与 Interceptor（0x12 10 Hz，边沿单次发布；
+    // 自身的 gimbal_trigger_sub 订阅会同步产生云台 AIM/中止请求）。
+    if (now_armed != was_armed)
+    {
+        std_msgs::msg::Header trigger;
+        trigger.stamp = this->now();
+        trigger.frame_id = now_armed ? "ON" : "OFF";
+        trigger_pub->publish(trigger);
+        RCLCPP_INFO(this->get_logger(), "Props %s: tracker trigger %s",
+                    now_armed ? "spinning (armed)" : "stopped (disarmed)",
+                    trigger.frame_id.c_str());
+    }
 
     publishState(p.mode_flags, now_armed);
 

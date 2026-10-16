@@ -21,6 +21,80 @@ from gimbal_pysim_test import build_reply, parse_ctrl
 from sitl_odometry_test import encode, shutdown
 
 
+def test_armed_edge_publishes_tracker_trigger(tmp_path, monkeypatch):
+    """0x12 STATUS_ARMED rising edge -> /fpv/tracker_trigger ON (tracker start),
+    falling edge -> OFF (tracker + interceptor stop); exactly one frame per
+    edge, none while the state is held."""
+    monkeypatch.setenv("ROS_DOMAIN_ID", str(160 + os.getpid() % 60))
+    binary = Path(os.environ.get("APM_BRIDGE_TEST_BINARY",
+                  Path(__file__).resolve().parents[3] / "build/apm_bridge/custom_link_bridge_node"))
+    assert binary.is_file(), f"Build the bridge first: {binary}"
+    server = socket.socket()
+    server.bind(("127.0.0.1", 0))
+    server.listen()
+    server.settimeout(5)
+    context = Context()
+    rclpy.init(context=context)
+    node = Node("armed_edge_test", context=context)
+    executor = SingleThreadedExecutor(context=context)
+    executor.add_node(node)
+    triggers = []
+    node.create_subscription(Header, "/fpv/tracker_trigger",
+                             lambda m: triggers.append(m.frame_id), 10)
+    process = connection = None
+    armed = False
+    log_path = tmp_path / "bridge.log"
+    try:
+        with log_path.open("w") as log:
+            process = subprocess.Popen([
+                str(binary), "--ros-args", "-p", "link.transport:=tcp",
+                "-p", f"link.tcp_port:={server.getsockname()[1]}",
+            ], stdout=log, stderr=subprocess.STDOUT)
+            connection = server.accept()[0]
+            connection.setblocking(False)
+
+            def pump(duration):
+                deadline = time.monotonic() + duration
+                while time.monotonic() < deadline:
+                    assert process.poll() is None, log_path.read_text()
+                    timestamp = round(time.monotonic() * 1e6) & 0xffffffff
+                    connection.sendall(encode(0x12, struct.pack(
+                        "<IHihBBiiiHHIH", timestamp, 24000, 0, 0, 0, 0,
+                        0, 0, 0, 0, 0, 0, int(armed))))
+                    try:
+                        connection.recv(4096)
+                    except BlockingIOError:
+                        pass
+                    executor.spin_once(timeout_sec=.005)
+                    time.sleep(.005)
+
+            def wait_for(predicate):
+                deadline = time.monotonic() + 5
+                while not predicate():
+                    assert time.monotonic() < deadline, \
+                        f"triggers={triggers}\n{log_path.read_text()}"
+                    pump(.03)
+
+            pump(.2)  # disarmed 0x12 stream must not trigger anything
+            assert triggers == []
+            armed = True
+            wait_for(lambda: triggers == ["ON"])
+            pump(.2)  # armed held: edge-triggered, still exactly one ON
+            assert triggers == ["ON"]
+            armed = False
+            wait_for(lambda: triggers == ["ON", "OFF"])
+            pump(.2)  # disarmed held: no further frames
+            assert triggers == ["ON", "OFF"]
+    finally:
+        shutdown(process)
+        if connection is not None:
+            connection.close()
+        server.close()
+        executor.shutdown()
+        node.destroy_node()
+        rclpy.shutdown(context=context)
+
+
 def test_actual_node_modes_and_los_subscription(tmp_path, monkeypatch):
     monkeypatch.setenv("ROS_DOMAIN_ID", str(160 + os.getpid() % 60))
     binary = Path(os.environ.get("APM_BRIDGE_TEST_BINARY",

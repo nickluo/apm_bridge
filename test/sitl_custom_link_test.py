@@ -12,6 +12,9 @@ custom_link_bridge_node over TCP, and finally exercises:
   4. offboard takeover  : state.mode == OFFBOARD, motors spin at commanded thrust
   5. watchdog release   : stopping the control stream drops OFFBOARD within ~1 s
   6. host disarm        : ~/arm false disarms the FC
+  7. arm-edge trigger   : STATUS_ARMED edges auto-publish /fpv/tracker_trigger
+                          ON (props spinning -> tracker start) and OFF (props
+                          stopped -> tracker + interceptor stop)
 
 Usage (workspace with apm_bridge built and sourced):
   python3 test/sitl_custom_link_test.py --binary <betaflight repo>/obj/betaflight_2026.6.1_SITL
@@ -35,7 +38,7 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy
 from mavros_msgs.msg import RCIn, State
 from quadrotor_msgs.msg import ControlCommand
 from sensor_msgs.msg import Imu
-from std_msgs.msg import Bool
+from std_msgs.msg import Bool, Header
 
 RC_PORT = 9004
 FDM_PORT = 9003
@@ -129,12 +132,21 @@ class BridgeObserver(Node):
         self.imu_stamp_lag_max = 0.0
         self.imu_acc_mag = None
         self.state = State()
+        self.triggers = []
         self.create_subscription(Imu, "/mavros/imu/data", self._imu, qos_be)
         self.create_subscription(RCIn, "/mavros/rc/in", self._rc, qos_be)
         self.create_subscription(State, "/mavros/state", self._state, 10)
+        self.create_subscription(Header, "/fpv/tracker_trigger", self._trigger, 10)
         self.arm_pub = self.create_publisher(Bool, "/fpv/arm", 10)
         self.cmd_pub = self.create_publisher(
             ControlCommand, "/fpv/control_command_raw", qos_be)
+
+    def _trigger(self, msg):
+        self.triggers.append((time.monotonic(), msg.frame_id))
+
+    def trigger_received(self, frame_id, since=None):
+        return any(f == frame_id and (since is None or t >= since)
+                   for t, f in self.triggers)
 
     def _imu(self, msg):
         self.imu_count += 1
@@ -301,6 +313,8 @@ def main():
         ok &= results.get("imu_rate", False)
 
         print("== 4. host arm via 0x20 (BOXOFFBOARD switch held by RC feed) ==")
+        results["idle_no_trigger"] = not observer.triggers  # disarmed so far: no edge, no trigger
+        arm_ask = time.monotonic()
         observer.arm_pub.publish(Bool(data=True))
         # 控制流以 50 Hz 持续发送，arm 位随帧携带
         def command_stream(duration, thrust):
@@ -311,6 +325,10 @@ def main():
         stream = threading.Thread(target=command_stream, args=(12.0, 0.5), daemon=True)
         stream.start()
         results["host_arm"] = wait_for("armed", lambda: observer.state.armed, timeout=12)
+        # 起桨边沿：桥必须在 0x12 armed 位置位后自动发布 tracker ON
+        results["arm_edge_trigger_on"] = wait_for(
+            "tracker ON on the arm edge",
+            lambda: observer.trigger_received("ON", arm_ask), timeout=5)
 
         print("== 5. OFFBOARD takeover + motor response ==")
         results["offboard_mode"] = wait_for("state.mode == OFFBOARD",
@@ -348,7 +366,9 @@ def main():
         print("== 6. watchdog release (revoke arm -> stream stops) ==")
         # arm-only 流（无新鲜命令）会持续携带 arm=1 + 中性油门：OFFBOARD
         # 保持、电机回落 idle——这是设计语义。验证看门狗须先撤销解锁请求，
-        # 节点随即停发 0x20，FC 侧超时退回 RC。
+        # 节点随即停发 0x20，FC 侧超时退回 RC。撤销后 FC 可能随时上锁，
+        # disarm 边沿窗口从这里起算。
+        disarm_window = time.monotonic()
         observer.arm_pub.publish(Bool(data=False))
         results["watchdog_release"] = wait_for(
             "OFFBOARD dropped", lambda: observer.state.mode != "OFFBOARD", timeout=3)
@@ -361,6 +381,11 @@ def main():
         observer.arm_pub.publish(Bool(data=False))
         results["host_disarm"] = wait_for(
             "disarmed", lambda: not observer.state.armed, timeout=5)
+        # 落桨边沿：无论上锁发生在看门狗释放还是显式 host disarm，桥都必须
+        # 自动发布 tracker OFF（停止 Tracker 与 Interceptor）
+        results["disarm_edge_trigger_off"] = wait_for(
+            "tracker OFF on the disarm edge",
+            lambda: observer.trigger_received("OFF", disarm_window), timeout=5)
         stream2.join(timeout=3)
     finally:
         observer.destroy_node()
