@@ -54,6 +54,7 @@ namespace custom_link
             int16_t temp_cdeg;     // 0.01 degC，融合温度：气压计 > IMU >
                                        // ISA 估计（海平面 20 degC，每升 100 m 降 0.6 degC）
             uint16_t rc[16];           // us
+            uint8_t rssi_pct;          // RC 链路质量，0..100
         };
 
         struct PayloadSlow
@@ -111,7 +112,7 @@ namespace custom_link
 #pragma pack(pop)
 
         static_assert(sizeof(PayloadFast) == 22, "fast payload size");
-        static_assert(sizeof(PayloadMedium) == 46, "medium payload size");
+        static_assert(sizeof(PayloadMedium) == 47, "medium payload size");
         static_assert(sizeof(PayloadSlow) == 36, "slow payload size");
         static_assert(sizeof(PayloadControl) == 20, "control payload size");
         static_assert(sizeof(PayloadOdometry) == 64, "odometry payload size");

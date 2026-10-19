@@ -501,6 +501,7 @@ void CustomLinkVehicleNode::handleMedium(const custom_link::protocol::PayloadMed
 {
     mavros_msgs::msg::RCIn msg;
     msg.header.stamp = rclcpp::Time(static_cast<int64_t>(hostUs) * 1000, RCL_ROS_TIME);
+    msg.rssi = p.rssi_pct; // RC 链路质量 0..100（真机 rx RSSI 源 / SITL 帧新鲜度）
     msg.channels.assign(p.rc, p.rc + 16);
     rc_in_pub->publish(msg);
 

@@ -307,8 +307,11 @@ Both invalid readings are logged.
 Gyro/acceleration/attitude/state/RC/GPS/battery data all come from the firmware's
 custom telemetry; none are inferred through MSP or AirSim state APIs.
 `/fpv/altitude` exposes the **0x11** altitude (meters) for calibration.
-The RC channels are mirrored on `/mavros/rc/in` (`mavros_msgs/msg/RCIn`,
-best effort) from the **0x11** stream at 100 Hz. The RC trigger pulse
+The RC channels and link quality are mirrored on `/mavros/rc/in`
+(`mavros_msgs/msg/RCIn`, best effort) from the **0x11** stream at 100 Hz;
+`rssi` carries the FC's RC link quality, **0..100** (hardware: the rx RSSI
+source, e.g. CRSF LQ; simulator: 100 while RC frames are fresh, 0 after the
+feeder stops). The RC trigger pulse
 (`channel_trigger`) defaults to CH8/AUX4, zero-based index 7, in the SITL
 parameters; see "Tracker trigger" above for its mission start/stop semantics.
 

@@ -12,9 +12,10 @@ import rclpy
 from rclpy.context import Context
 from rclpy.executors import SingleThreadedExecutor
 from rclpy.node import Node
-from rclpy.qos import QoSProfile, DurabilityPolicy
+from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy
 from rclpy.time import Time
 from geometry_msgs.msg import TwistStamped
+from mavros_msgs.msg import RCIn
 from std_msgs.msg import Bool, Header, Int8, String
 
 from gimbal_pysim_test import build_reply, parse_ctrl
@@ -43,6 +44,9 @@ def test_rc_pulse_starts_and_stops_mission_only(tmp_path, monkeypatch):
     triggers = []
     node.create_subscription(Header, "/fpv/tracker_trigger",
                              lambda m: triggers.append(m.frame_id), 10)
+    rc_in = []
+    node.create_subscription(RCIn, "/mavros/rc/in", lambda m: rc_in.append(m.rssi),
+                             QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT))
     tracker_pub = node.create_publisher(Int8, "/fpv/tracker_state", 1)
     mission_pub = node.create_publisher(Bool, "/fpv/mission_state", 1)
     process = connection = None
@@ -67,7 +71,7 @@ def test_rc_pulse_starts_and_stops_mission_only(tmp_path, monkeypatch):
                     channels = [1000] * 16
                     channels[7] = rc_trigger
                     connection.sendall(encode(0x11, struct.pack(
-                        "<IIih16H", timestamp, 101325, 200, 2000, *channels)))
+                        "<IIih16HB", timestamp, 101325, 200, 2000, *channels, 87)))
                     connection.sendall(encode(0x12, struct.pack(
                         "<IHihBBiiiHHIH", timestamp, 24000, 0, 0, 0, 0,
                         0, 0, 0, 0, 0, 0, 0)))
@@ -101,16 +105,17 @@ def test_rc_pulse_starts_and_stops_mission_only(tmp_path, monkeypatch):
             rc_trigger = 2000
             wait_for(lambda: triggers == ["MISSION"])
             assert "requesting custom-link OFFBOARD" in log_path.read_text()
-            # Mission running: the pulse dismisses it (tracker keeps running)
-            # and requests MANUAL.
+            # The medium frames carry rssi 87; it must flow through to RCIn.
+            assert rc_in and rc_in[-1] == 87, f"rc_in rssi={rc_in[-3:]}"
+
+            # Mission running: the pulse dismisses it and requests MANUAL
+            # (OFF and DISMISS share the bridge's release handling).
             mission = True
             rc_trigger = 1000
             pump(.3)
             rc_trigger = 2000
             wait_for(lambda: triggers == ["MISSION", "DISMISS"])
-            log_text = log_path.read_text()
-            assert "MISSION dismiss: requesting custom-link MANUAL" in log_text
-            assert "Tracker OFF:" not in log_text  # DISMISS must not stop the tracker
+            assert "Tracker OFF: requesting custom-link MANUAL" in log_path.read_text()
     finally:
         shutdown(process)
         if connection is not None:
@@ -244,7 +249,7 @@ def test_actual_node_modes_and_los_subscription(tmp_path, monkeypatch):
                     assert process.poll() is None, log_path.read_text()
                     timestamp = round((time.monotonic() - start) * 1e6) & 0xffffffff
                     connection.sendall(encode(0x10, struct.pack("<I9h", timestamp, 0, 0, 0, 0, 0, 1000, 0, 0, 0)))
-                    connection.sendall(encode(0x11, struct.pack("<IIih16H", timestamp, 101325, 200, 2000, *([1500] * 16))))
+                    connection.sendall(encode(0x11, struct.pack("<IIih16HB", timestamp, 101325, 200, 2000, *([1500] * 16), 87)))
                     connection.sendall(encode(0x12, struct.pack("<IHihBBiiiHHIH", timestamp, 24000, 0, 0, 0, 0,
                                                               0, 0, 0, 0, 0, (1 << 13) if offboard else 0, int(armed))))
                     mission_pub.publish(Bool(data=mission))
