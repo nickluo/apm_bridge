@@ -108,6 +108,8 @@ mode is published on `/fpv/gimbal_mode` (`std_msgs/msg/String`, transient-local)
 HORIZON persists after takeover/exit until a new tracker `ON`, a new authorized
 mission, or disarming. A stale `mission_state=true` cannot resume an interrupted
 mission after a manual takeover/OFF; it must become false before a new mission.
+A `MISSION` trigger frame also requests FC OFFBOARD itself (see "Tracker
+trigger" below), so the authorization arrives with the mission start.
 Losing a target **does not leave MISSION**: pitch/yaw tracking decelerates to
 zero and holds the current stabilized orientation. Missing/invalid/stale LOS is
 logged. Real hardware also stops MISSION rates and suppresses camera pose
@@ -173,6 +175,36 @@ overriding AIM. The tracker example settings have been updated. Camera control
 uses `airsim.host/port/vehicle_name/camera_name`, preserves the camera's initial
 body-relative position, and converts world ENU/FLU commands to relative NED/FRD
 poses. Configure the tracker with matching endpoint/camera names.
+
+### Tracker trigger (`/fpv/tracker_trigger`)
+
+`std_msgs/msg/Header` frames drive the vision pipeline and the mission
+lifecycle; the bridge both consumes and publishes them:
+
+| frame_id | Published by the bridge when | Bridge reaction on receipt |
+| --- | --- | --- |
+| `ON` | FC **arming** edge (props spin up) | gimbal AIM request; tracker starts |
+| `OFF` | FC **disarming** edge | gimbal abort; tracker + interceptor stop; **requests MANUAL** |
+| `MISSION` | RC trigger pulse while vision/radar is locked and no mission runs | **requests OFFBOARD** |
+| `DISMISS` | RC trigger pulse while a mission runs | interceptor cancels control, **tracker keeps running**; **requests MANUAL** |
+
+The interceptor cancels interception control on either `OFF` or `DISMISS`;
+`OFF` additionally stops the tracker (disarm edge), while `DISMISS` is the
+pilot's stop pulse - vision stays up so a later pulse can re-trigger once
+still locked.
+
+Additionally, `/fpv/mission_state` falling `true -> false` (the interceptor
+terminated) requests MANUAL as well, so host authority is released even if no
+`OFF` frame is sent. The OFFBOARD/MANUAL requests are the same `mode_req`
+transitions as the explicit `~/offboard` topic below - entering a mission no
+longer requires the pilot's OFFBOARD aux switch.
+
+The RC trigger pulse is a `channel_trigger` channel (SITL default CH8/AUX4,
+zero-based index 7) held **above 1900 for more than 0.5 s**; it is one-shot per
+hold and re-arms when the channel drops below 1100. A pulse only starts a
+locked, idle mission or dismisses a running one - a pulse without a lock is
+ignored with a warning, and it never toggles the tracker (arming edges own
+tracker start/stop).
 
 ### Target LOS wire contract
 
@@ -241,15 +273,17 @@ The existing `/fpv/control_command`, `/fpv/control_command_raw`, `/fpv/arm`,
 `/fpv/low_level_feedback` and MAVROS-compatible telemetry interfaces are reused.
 `/fpv/offboard` (`std_msgs/msg/Bool`, private name `~/offboard`) independently
 requests OFFBOARD (`true`, custom-link `0x20 mode_req=2`) or manual control
-(`false`, `mode_req=0`). A request is sent even without a fresh control command;
+(`false`, `mode_req=0`). The same mode requests are also issued automatically
+by the tracker-trigger linkage described above (MISSION enters OFFBOARD,
+OFF/mission-end releases it); both paths share one mode request. A request is
+sent even without a fresh control command;
 subsequent control/arm frames retain the requested mode. Mode requests do not
 change the host arm bit, and do not keep stale control commands alive: maintain
 a fresh control stream while in OFFBOARD. The actual result is reported by
 `/mavros/state`, subject to firmware safety and pilot/Rescue arbitration.
 The pilot's held OFFBOARD AUX switch takes priority over an API manual request.
 After pilot takeover, deliberately request `false`, then `true` to enter a
-new API session. Existing automatic OFFBOARD behavior is unchanged until this
-topic is used.
+new API session.
 
 ```bash
 ros2 topic pub --once /fpv/offboard std_msgs/msg/Bool "{data: true}"
@@ -273,7 +307,10 @@ Both invalid readings are logged.
 Gyro/acceleration/attitude/state/RC/GPS/battery data all come from the firmware's
 custom telemetry; none are inferred through MSP or AirSim state APIs.
 `/fpv/altitude` exposes the **0x11** altitude (meters) for calibration.
-RC trigger defaults to CH8/AUX4, zero-based index 7.
+The RC channels are mirrored on `/mavros/rc/in` (`mavros_msgs/msg/RCIn`,
+best effort) from the **0x11** stream at 100 Hz. The RC trigger pulse
+(`channel_trigger`) defaults to CH8/AUX4, zero-based index 7, in the SITL
+parameters; see "Tracker trigger" above for its mission start/stop semantics.
 
 The **only** AirSim RPC is `simGetCameraInfo`. Camera FRD/NED orientation is
 converted to FLU/ENU; `/fpv/gimbal` preserves the hardware heading-relative

@@ -257,7 +257,7 @@ CustomLinkVehicleNode::CustomLinkVehicleNode()
         "/fpv/tracker_trigger", 10, [this](const std_msgs::msg::Header::SharedPtr msg) {
             if (msg->frame_id == "ON")
                 gimbal_aim_requested = true;
-            else if (msg->frame_id == "OFF")
+            else if (msg->frame_id == "OFF" || msg->frame_id == "DISMISS")
             {
                 gimbal_abort_requested = true;
                 // 退出 MISSION 联动：退出 OFFBOARD（modeReq=0），杆量权限即刻交还飞手。
@@ -991,9 +991,13 @@ void CustomLinkVehicleNode::offboardCallback(const std_msgs::msg::Bool::SharedPt
 
 void CustomLinkVehicleNode::rcTriggerUpdate(const uint16_t *channels, size_t count)
 {
+    // RC 触发脉冲（>0.5 s 保持判定、单次锁存、释放复位）只负责 MISSION 的
+    // 启动与停止：任务中脉冲 = 停止（DISMISS，仅解除拦截控制，Tracker 保持
+    // 运行，联动退出 OFFBOARD）；空闲且视觉/雷达锁定时脉冲 = 触发（MISSION，
+    // 联动进入 OFFBOARD）。Tracker 的启停由起桨/落桨边沿自动发布的 ON/OFF
+    // 负责（handleSlow），不再由脉冲翻转。
     static rclcpp::Time last_triggered_time;
     static bool toggled = false;
-    static bool trigger_state = false;
 
     if (static_cast<int>(count) <= channel_trigger)
         return;
@@ -1013,14 +1017,19 @@ void CustomLinkVehicleNode::rcTriggerUpdate(const uint16_t *channels, size_t cou
                 toggled = true;
                 auto msg = std::make_unique<std_msgs::msg::Header>();
                 msg->stamp = this->now();
-                if ((in_tracking || radar_tracking) && trigger_state && !in_mission)
+                if (in_mission.load())
+                {
+                    msg->frame_id = "DISMISS";
+                }
+                else if (in_tracking.load() || radar_tracking.load())
                 {
                     msg->frame_id = "MISSION";
                 }
                 else
                 {
-                    trigger_state = !trigger_state;
-                    msg->frame_id = trigger_state ? "ON" : "OFF";
+                    RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                        "Trigger pulse ignored: no vision/radar lock and no mission running");
+                    return;
                 }
                 RCLCPP_INFO(this->get_logger(), "Tracker Triggered : %s (vision=%d radar=%d)",
                             msg->frame_id.c_str(), in_tracking.load(), radar_tracking.load());

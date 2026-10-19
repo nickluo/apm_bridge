@@ -15,10 +15,110 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, DurabilityPolicy
 from rclpy.time import Time
 from geometry_msgs.msg import TwistStamped
-from std_msgs.msg import Bool, Header, String
+from std_msgs.msg import Bool, Header, Int8, String
 
 from gimbal_pysim_test import build_reply, parse_ctrl
 from sitl_odometry_test import encode, shutdown
+
+
+def test_rc_pulse_starts_and_stops_mission_only(tmp_path, monkeypatch):
+    """AUX4 pulse semantics: a >=0.5 s hold publishes MISSION when vision is
+    locked and no mission runs, DISMISS while a mission runs (interception is
+    cancelled, the tracker keeps running), and nothing without a lock - the
+    tracker start/stop stays with the arm edges. MISSION/DISMISS also drive
+    the OFFBOARD/MANUAL custom-link request (log-verified linkage)."""
+    monkeypatch.setenv("ROS_DOMAIN_ID", str(160 + os.getpid() % 60))
+    binary = Path(os.environ.get("APM_BRIDGE_TEST_BINARY",
+                  Path(__file__).resolve().parents[3] / "build/apm_bridge/custom_link_bridge_node"))
+    assert binary.is_file(), f"Build the bridge first: {binary}"
+    server = socket.socket()
+    server.bind(("127.0.0.1", 0))
+    server.listen()
+    server.settimeout(5)
+    context = Context()
+    rclpy.init(context=context)
+    node = Node("rc_pulse_test", context=context)
+    executor = SingleThreadedExecutor(context=context)
+    executor.add_node(node)
+    triggers = []
+    node.create_subscription(Header, "/fpv/tracker_trigger",
+                             lambda m: triggers.append(m.frame_id), 10)
+    tracker_pub = node.create_publisher(Int8, "/fpv/tracker_state", 1)
+    mission_pub = node.create_publisher(Bool, "/fpv/mission_state", 1)
+    process = connection = None
+    locked = mission = False
+    rc_trigger = 1000  # AUX4 idle level (the latch resets only below 1100)
+    log_path = tmp_path / "bridge.log"
+    try:
+        with log_path.open("w") as log:
+            process = subprocess.Popen([
+                str(binary), "--ros-args", "-p", "link.transport:=tcp",
+                "-p", f"link.tcp_port:={server.getsockname()[1]}",
+                "-p", "channel_trigger:=7",
+            ], stdout=log, stderr=subprocess.STDOUT)
+            connection = server.accept()[0]
+            connection.setblocking(False)
+
+            def pump(duration):
+                deadline = time.monotonic() + duration
+                while time.monotonic() < deadline:
+                    assert process.poll() is None, log_path.read_text()
+                    timestamp = round(time.monotonic() * 1e6) & 0xffffffff
+                    channels = [1000] * 16
+                    channels[7] = rc_trigger
+                    connection.sendall(encode(0x11, struct.pack(
+                        "<IIih16H", timestamp, 101325, 200, 2000, *channels)))
+                    connection.sendall(encode(0x12, struct.pack(
+                        "<IHihBBiiiHHIH", timestamp, 24000, 0, 0, 0, 0,
+                        0, 0, 0, 0, 0, 0, 0)))
+                    tracker_pub.publish(Int8(data=2 if locked else 0))
+                    mission_pub.publish(Bool(data=mission))
+                    try:
+                        connection.recv(4096)
+                    except BlockingIOError:
+                        pass
+                    executor.spin_once(timeout_sec=.005)
+                    time.sleep(.005)
+
+            def wait_for(predicate):
+                deadline = time.monotonic() + 5
+                while not predicate():
+                    assert time.monotonic() < deadline, \
+                        f"triggers={triggers}\n{log_path.read_text()}"
+                    pump(.03)
+
+            wait_for(lambda: tracker_pub.get_subscription_count() > 0
+                     and mission_pub.get_subscription_count() > 0)
+            # No lock: the pulse is ignored (tracker on/off is the arm edge's job).
+            rc_trigger = 2000
+            pump(.9)
+            assert triggers == []
+            assert "Trigger pulse ignored" in log_path.read_text()
+            # Locked and idle: the pulse starts a MISSION and requests OFFBOARD.
+            locked = True
+            rc_trigger = 1000
+            pump(.3)  # release below 1100 us resets the one-shot latch
+            rc_trigger = 2000
+            wait_for(lambda: triggers == ["MISSION"])
+            assert "requesting custom-link OFFBOARD" in log_path.read_text()
+            # Mission running: the pulse dismisses it (tracker keeps running)
+            # and requests MANUAL.
+            mission = True
+            rc_trigger = 1000
+            pump(.3)
+            rc_trigger = 2000
+            wait_for(lambda: triggers == ["MISSION", "DISMISS"])
+            log_text = log_path.read_text()
+            assert "MISSION dismiss: requesting custom-link MANUAL" in log_text
+            assert "Tracker OFF:" not in log_text  # DISMISS must not stop the tracker
+    finally:
+        shutdown(process)
+        if connection is not None:
+            connection.close()
+        server.close()
+        executor.shutdown()
+        node.destroy_node()
+        rclpy.shutdown(context=context)
 
 
 def test_armed_edge_publishes_tracker_trigger(tmp_path, monkeypatch):
