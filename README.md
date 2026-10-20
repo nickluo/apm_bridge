@@ -154,7 +154,7 @@ MISSION parameters (same YAML keys on both backends):
 | Parameter | Default | Meaning |
 | --- | --- | --- |
 | `gimbal.tracking_gain` | 2.0 | Image-angle proportional gain, 1/s |
-| `gimbal.tracking_max_rate` | 30.0 | Per-axis limit, deg/s; also bounded by `max_angle_speed` |
+| `gimbal.tracking_max_rate` | 30.0 | Per-axis limit, deg/s; the single speed cap for MISSION tracking and HORIZON leveling (absorbs the former `max_angle_speed`) |
 | `gimbal.tracking_max_accel` | 90.0 | Per-axis command slew limit, deg/s² |
 | `gimbal.tracking_filter_tau` | 0.15 | First-order commanded-rate filter, seconds |
 | `gimbal.tracking_rate_feedforward` | 1.0 | Gain on ego-compensated LOS angular-rate feedforward; 0 retains angle feedback only for noisy rendered-camera tracking |

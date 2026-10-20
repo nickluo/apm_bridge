@@ -8,15 +8,16 @@ custom_link_bridge:
     battery.capacity_mah: 0.0
     gimbal_port: ""
     gimbal:
+      mission_on_ground: true
       model: "C20S"
       pitch_aim: -10.0 # AIM is 80 deg relative to the launcher-mounted body.
       pitch_max: 85.0 # Virtual SITL joint only; hardware model defaults remain unchanged.
       pitch_hold: 0.0 # HORIZON alone: positive nose-up, degrees. MISSION centers LOS at zero.
       tracking_gain: 2.0
-      tracking_max_rate: 30.0 # deg/s, per actuated axis.
-      tracking_max_accel: 90.0 # deg/s^2.
-      tracking_filter_tau: 0.15 # seconds.
-      los_timeout: 0.3 # seconds.
+      tracking_max_rate: 150.0 # deg/s, per actuated axis; the single per-axis speed cap for MISSION tracking and HORIZON leveling (absorbs the former max_angle_speed).
+      tracking_max_accel: 600.0 # deg/s^2.
+      tracking_filter_tau: 0.12 # seconds.
+      los_timeout: 0.5 # seconds; tracker LOS stamps lag up to ~0.35 s under load — at 0.3 the MISSION gimbal intermittently drops to locked-hold and a fast target spirals it out of frame
       roll_hold_enter: 75.0
       roll_hold_exit: 70.0
 

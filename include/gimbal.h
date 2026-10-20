@@ -149,7 +149,8 @@ struct GimbalConfig
     // 控制增益 (沿用原硬编码的现场调参数值, 仅 C-40D/C-200T 使用)
     float pitch_roll_speed_scale = 12.0f; // 俯仰/滚转速度控制比例系数
     float yaw_speed_scale = 10.0f;        // 偏航速度控制比例系数
-    float max_angle_speed = 150.0f;       // 最大角速度 (deg/s)
+    // tracking.max_rate_dps 是唯一的每轴角速度上限 (deg/s): MISSION 跟踪控制器、
+    // HORIZON 回平 P 控制与限位蠕行共用 (合并了原 max_angle_speed 参数)。
     apm_bridge::GimbalTrackingConfig tracking;
 
     // AIM: camera +X aims toward body FLU +Z, with a nose-up pitch offset.
@@ -184,10 +185,11 @@ struct GimbalConfig
      *       gimbal.roll_min/roll_max, gimbal.pitch_min/pitch_max,
      *       gimbal.yaw_min/yaw_max (deg),
      *       gimbal.pitch_roll_speed_scale, gimbal.yaw_speed_scale,
-     *       gimbal.max_angle_speed, gimbal.send_uav_data,
+     *       gimbal.send_uav_data,
      *       gimbal.pitch_aim, gimbal.pitch_hold, gimbal.roll_hold_enter, gimbal.roll_hold_exit,
      *       gimbal.tracking_gain/tracking_rate_feedforward/tracking_max_rate/tracking_max_accel,
      *       gimbal.tracking_filter_tau/los_timeout
+     *       (tracking_max_rate 是所有模式的统一每轴角速度上限, 原 max_angle_speed 已并入)
      */
     static GimbalConfig fromParameters(rclcpp::Node &node);
     std::array<double, 3> aimTargetDegrees() const;

@@ -175,7 +175,6 @@ GimbalConfig GimbalConfig::fromParameters(rclcpp::Node &node)
     cfg.yaw.max_deg = param_f("gimbal.yaw_max", cfg.yaw.max_deg);
     cfg.pitch_roll_speed_scale = param_f("gimbal.pitch_roll_speed_scale", cfg.pitch_roll_speed_scale);
     cfg.yaw_speed_scale = param_f("gimbal.yaw_speed_scale", cfg.yaw_speed_scale);
-    cfg.max_angle_speed = param_f("gimbal.max_angle_speed", cfg.max_angle_speed);
     cfg.pitch_aim_deg = param_f("gimbal.pitch_aim", cfg.pitch_aim_deg);
     cfg.pitch_hold_deg = param_f("gimbal.pitch_hold", cfg.pitch_hold_deg);
     cfg.roll_hold_enter_deg = param_f("gimbal.roll_hold_enter", cfg.roll_hold_enter_deg);
@@ -188,15 +187,13 @@ GimbalConfig GimbalConfig::fromParameters(rclcpp::Node &node)
     cfg.tracking.los_timeout = param_f("gimbal.los_timeout", cfg.tracking.los_timeout);
     cfg.tracking.validate();
     if (!std::isfinite(cfg.pitch_hold_deg) || std::abs(cfg.pitch_hold_deg) > 90 ||
-        !std::isfinite(cfg.max_angle_speed) || cfg.max_angle_speed <= 0 ||
         !std::isfinite(cfg.roll_hold_enter_deg) || !std::isfinite(cfg.roll_hold_exit_deg) ||
         cfg.roll_hold_exit_deg < 0 || cfg.roll_hold_enter_deg < cfg.roll_hold_exit_deg)
-        throw std::invalid_argument("Invalid gimbal pitch hold, speed or roll protection thresholds");
+        throw std::invalid_argument("Invalid gimbal pitch hold or roll protection thresholds");
     for (const auto &axis : {cfg.roll, cfg.pitch, cfg.yaw})
         if (!std::isfinite(axis.min_deg) || !std::isfinite(axis.max_deg) ||
             axis.min_deg > axis.max_deg)
             throw std::invalid_argument("Invalid gimbal mechanical limits");
-    cfg.tracking.max_rate_dps = std::min(cfg.tracking.max_rate_dps, double(cfg.max_angle_speed));
     cfg.aimTargetDegrees();
 
     node.declare_parameter<bool>("gimbal.send_uav_data", cfg.send_uav_data);
@@ -465,12 +462,14 @@ void GimbalControl::run()
                     bool max = false;
                     float r_ratio = 1.0f;
                     float p_ratio = 1.0f;
+                    // 统一每轴角速度上限 (原 max_angle_speed 并入 tracking_max_rate)
+                    const float max_rate_dps = static_cast<float>(cfg.tracking.max_rate_dps);
 
                     // 滚转轴: P 控制器驱动相机姿态角回水平
                     if (cfg.roll.present)
                     {
                         roll_exp = -last_response.cam_angle[0] * 0.01f * cfg.pitch_roll_speed_scale;
-                        roll_exp = std::clamp(roll_exp, -cfg.max_angle_speed, cfg.max_angle_speed);
+                        roll_exp = std::clamp(roll_exp, -max_rate_dps, max_rate_dps);
 
                         float mtr_roll = last_response.mtr_angle[1] * 0.01f;
                         if (std::abs(mtr_roll) >= cfg.roll.max_deg)
@@ -485,7 +484,7 @@ void GimbalControl::run()
                     if (cfg.pitch.present)
                     {
                         pitch_exp = (cfg.pitch_hold_deg - last_response.cam_angle[1] * 0.01f) * cfg.pitch_roll_speed_scale;
-                        pitch_exp = std::clamp(pitch_exp, -cfg.max_angle_speed, cfg.max_angle_speed);
+                        pitch_exp = std::clamp(pitch_exp, -max_rate_dps, max_rate_dps);
 
                         float mtr_pitch = last_response.mtr_angle[0] * 0.01f;
                         if (std::abs(last_response.mtr_angle[0] - last_response.cam_angle[1]) < static_cast<int>(cfg.pitch.max_deg * 100) && (mtr_pitch <= cfg.pitch.min_deg || mtr_pitch >= cfg.pitch.max_deg))
@@ -510,7 +509,7 @@ void GimbalControl::run()
                         if (max)
                         {
                             // Keep low speed when reaching limit
-                            yaw_exp = std::signbit(current_yaw_encoder) ? cfg.max_angle_speed * 0.01f : -cfg.max_angle_speed * 0.01f;
+                            yaw_exp = std::signbit(current_yaw_encoder) ? max_rate_dps * 0.01f : -max_rate_dps * 0.01f;
                         }
                         else
                         {
@@ -518,7 +517,7 @@ void GimbalControl::run()
                             if (std::abs(yaw_exp) < 0.1f)
                                 yaw_exp = 0.0f;
                             else
-                                yaw_exp = std::clamp(yaw_exp, -cfg.max_angle_speed, cfg.max_angle_speed);
+                                yaw_exp = std::clamp(yaw_exp, -max_rate_dps, max_rate_dps);
                         }
                     }
 
@@ -616,7 +615,7 @@ void GimbalControl::updateMissionControl(double dt)
             (axes[i].min_deg < axes[i].max_deg &&
              ((angle <= axes[i].min_deg && speed < 0) || (angle >= axes[i].max_deg && speed > 0))))
             speed = 0;
-        speed = std::clamp(speed, -double(cfg.max_angle_speed), double(cfg.max_angle_speed));
+        speed = std::clamp(speed, -cfg.tracking.max_rate_dps, cfg.tracking.max_rate_dps);
         ctrl_op_type[i] = OP_TYPE_REAL_SPEED;
         ctrl_op_value[i] = static_cast<int16_t>(std::round(speed * 10.0));
     }
