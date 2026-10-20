@@ -183,7 +183,7 @@ lifecycle; the bridge both consumes and publishes them:
 
 | frame_id | Published by the bridge when | Bridge reaction on receipt |
 | --- | --- | --- |
-| `ON` | FC **arming** edge (props spin up) | gimbal AIM request; tracker starts |
+| `ON` | FC **arming** edge (props spin up), or an AirSim RC preview pulse while disarmed | gimbal AIM request; tracker starts |
 | `OFF` | FC **disarming** edge | gimbal abort; tracker + interceptor stop; **requests MANUAL** |
 | `MISSION` | RC trigger pulse while vision/radar is locked and no mission runs | **requests OFFBOARD** |
 | `DISMISS` | RC trigger pulse while a mission runs | interceptor cancels control, **tracker keeps running**; **requests MANUAL** |
@@ -204,7 +204,10 @@ zero-based index 7) held **above 1900 for more than 0.5 s**; it is one-shot per
 hold and re-arms when the channel drops below 1100. A pulse only starts a
 locked, idle mission or dismisses a running one - a pulse without a lock is
 ignored with a warning, and it never toggles the tracker (arming edges own
-tracker start/stop).
+tracker start/stop). The AirSim-only exception is a pulse while disarmed:
+with `airsim.enabled=true` it publishes `ON` for non-arming vision/aim checks,
+even if a lock is already present. It never publishes `MISSION` or requests
+OFFBOARD while disarmed. Hardware and armed-flight pulse behavior is unchanged.
 
 ### Target LOS wire contract
 

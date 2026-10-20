@@ -30,7 +30,7 @@ custom_link_bridge:
       C: 0.011891350984191815
       D: -0.059949564628813956
       n: 1
-      thrust_limit: 0.9
+      thrust_limit: 1.0
       spin_k: 0.0
 
     airsim:

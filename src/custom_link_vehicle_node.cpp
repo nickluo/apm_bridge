@@ -597,7 +597,7 @@ void CustomLinkVehicleNode::handleSlow(const custom_link::protocol::PayloadSlow 
         std_msgs::msg::Header trigger;
         trigger.stamp = this->now();
         trigger.frame_id = now_armed ? "ON" : "OFF";
-        trigger_pub->publish(trigger);
+        trigger_pub->publish(std::move(trigger));
         RCLCPP_INFO(this->get_logger(), "Props %s: tracker trigger %s",
                     now_armed ? "spinning (armed)" : "stopped (disarmed)",
                     trigger.frame_id.c_str());
@@ -763,8 +763,18 @@ void CustomLinkVehicleNode::publishState(uint32_t mode_flags, bool is_armed)
 
     // OFFBOARD 是自定义链路的接管模式，等价于 ArduPilot GUIDED / 旧 MSP_OVERRIDE。
     const bool offboard = mode_flags & mode::OFFBOARD;
+    const bool was_offboard = !rc_manual.load();
 
     rc_manual.store(!offboard);
+
+    if (in_mission.load() && was_offboard && !offboard)
+    {
+        // Send a trigger to indicate that offboard mode was lost during a mission
+        std_msgs::msg::Header trigger;
+        trigger.stamp = this->now();
+        trigger.frame_id = "DISMISS";
+        trigger_pub->publish(std::move(trigger));
+    }
 
     const double alt = altitude_m.load();
     const double vertical_velocity = vertical_velocity_mps.load();
@@ -838,13 +848,13 @@ void CustomLinkVehicleNode::publishState(uint32_t mode_flags, bool is_armed)
         if (!plus)
             state.mode = "ACRO";
     }
-    state_pub->publish(state);
+    state_pub->publish(std::move(state));
 
     mavros_msgs::msg::ExtendedState ext;
-    ext.header.stamp = state.header.stamp;
+    ext.header.stamp = this->now();
     ext.landed_state = landed_state.load();
     ext.vtol_state = mavros_msgs::msg::ExtendedState::VTOL_STATE_UNDEFINED;
-    ext_state_pub->publish(ext);
+    ext_state_pub->publish(std::move(ext));
 }
 
 // ======================================================================
@@ -996,7 +1006,7 @@ void CustomLinkVehicleNode::rcTriggerUpdate(const uint16_t *channels, size_t cou
     // 启动与停止：任务中脉冲 = 停止（DISMISS，仅解除拦截控制，Tracker 保持
     // 运行，联动退出 OFFBOARD）；空闲且视觉/雷达锁定时脉冲 = 触发（MISSION，
     // 联动进入 OFFBOARD）。Tracker 的启停由起桨/落桨边沿自动发布的 ON/OFF
-    // 负责（handleSlow），不再由脉冲翻转。
+    // 负责（handleSlow），不再由脉冲翻转。AirSim 未解锁时的脉冲仅启动视觉预览。
     static rclcpp::Time last_triggered_time;
     static bool toggled = false;
 
@@ -1018,7 +1028,13 @@ void CustomLinkVehicleNode::rcTriggerUpdate(const uint16_t *channels, size_t cou
                 toggled = true;
                 auto msg = std::make_unique<std_msgs::msg::Header>();
                 msg->stamp = this->now();
-                if (in_mission.load())
+                if (airsim_enabled && !armed.load())
+                {
+                    // RC-only, non-arming vision preview for AirSim aim checks.
+                    // Even a locked tracker must not start MISSION while disarmed.
+                    msg->frame_id = "ON";
+                }
+                else if (in_mission.load())
                 {
                     msg->frame_id = "DISMISS";
                 }
