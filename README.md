@@ -301,12 +301,22 @@ engine the serial CLI and `MSP2_CLI_SETTING` use - identical name matching,
 range validation and `"name = value"` response text. `CMD_GET`/`CMD_SET`
 round-trip a setting (SET replies with the readback), `CMD_INFO` returns the
 metadata block (`pgn`, `type`, min/max or lookup `values`, `default`)
-reassembled from any number of 56-byte chunks. FC-side failures arrive as
+reassembled from any number of 56-byte chunks, `CMD_BIND_RX` puts the
+receiver into pairing mode (the serial CLI's `bind_rx`; CRSF/SRXL2/SPI) and
+replies `"binding..."`, and `CMD_SAVE` persists the RAM config to flash
+(what `MSP_EEPROM_WRITE` does) - by default followed by an FC reboot like
+the serial CLI's `save` (the link drops and reconnects; pass `noreboot` to
+persist without rebooting). SAVE is refused while armed. FC-side failures arrive as
 `ok=true, status=ERR` with the text (`SET FAILED`, `NOT FOUND`, ...); local
 failures (link down, `timeout`, `chunk gap`, `length mismatch`, bad request)
 as `ok=false` with `error`. Writes are RAM-only (CLI `set` without `save`)
 and revert on reboot; there is no armed guard, matching MSP - do not hold the
 service responsible for what you set in flight.
+
+With `cli.bind_rx_on_connect: true` the node sends `bind_rx` automatically
+each time the link to the FC comes up (once per connection) and logs the FC's
+confirmation - enable it temporarily when pairing a new transmitter/receiver,
+keep it off otherwise so every power-up does not interrupt reception.
 
 ```bash
 ros2 service call /fpv/cli quadrotor_msgs/srv/CliCommand \

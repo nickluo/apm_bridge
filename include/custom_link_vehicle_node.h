@@ -128,10 +128,13 @@ namespace custom_link_bridge
         std::condition_variable cli_job_cv;
         std::deque<CliJob> cli_jobs;
         std::atomic_bool cli_worker_running{false};
+        bool rx_bind_pending = false;       // 持 cli_job_mtx；link up 时置位
+        bool cli_bind_rx_on_connect = false;
         double cli_timeout = 3.0;
         void cliServiceCallback(const std::shared_ptr<rmw_request_id_t> header,
                                 const std::shared_ptr<quadrotor_msgs::srv::CliCommand::Request> request);
         void cliWorkerLoop();
+        void maybeStartRxBind();
         void cliRespond(const std::shared_ptr<rmw_request_id_t> header,
                         std::shared_ptr<quadrotor_msgs::srv::CliCommand::Response> response);
         apm_bridge::GimbalModeSelector gimbal_mode_selector;

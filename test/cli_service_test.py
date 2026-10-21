@@ -33,7 +33,7 @@ from quadrotor_msgs.srv import CliCommand
 from sitl_odometry_test import encode, shutdown
 
 SYNC = b"\xeb\x90"
-CL_CLI_CMD_GET, CL_CLI_CMD_SET, CL_CLI_CMD_INFO = 0, 1, 2
+CL_CLI_CMD_GET, CL_CLI_CMD_SET, CL_CLI_CMD_INFO, CL_CLI_CMD_BIND_RX, CL_CLI_CMD_SAVE = 0, 1, 2, 3, 4
 CL_CLI_STATUS_OK, CL_CLI_STATUS_ERR = 0, 1
 CL_CLI_FLAG_MORE = 0x01
 
@@ -45,6 +45,8 @@ class FakeFc:
         self.connection = connection
         self.buffer = b""
         self.rx_cli = []          # (req_id, cmd, args) as received
+        self.bind_requests = []   # (req_id, args) for cmd 3
+        self.save_requests = []   # (req_id, args) for cmd 4
         self.seq = 0
 
     def pump(self):
@@ -118,6 +120,12 @@ class FakeFc:
                 values = ",".join(f"VALUE{i:02d}" for i in range(18))
                 self.respond(req_id, CL_CLI_STATUS_OK,
                              f"pgn=41\ntype=lookup\nvalues={values}\ndefault=VALUE00\n")
+        elif cmd == CL_CLI_CMD_BIND_RX:
+            self.bind_requests.append((req_id, args))
+            self.respond(req_id, CL_CLI_STATUS_OK, "binding...")
+        elif cmd == CL_CLI_CMD_SAVE:
+            self.save_requests.append((req_id, args))
+            self.respond(req_id, CL_CLI_STATUS_OK, "saving...")
 
     def respond(self, req_id, status, text):
         data = text.encode()
@@ -270,6 +278,23 @@ def test_cli_service_end_to_end(tmp_path, monkeypatch):
             assert rc_count[0] - rc_before > 10, \
                 f"telemetry stalled during CLI call: {rc_count[0] - rc_before} rc frames"
 
+            # bind_rx through the service: action command, no settings engine.
+            # Default-off check first: nothing auto-sent since connect.
+            assert not fc.bind_requests, "auto bind fired with cli.bind_rx_on_connect unset"
+            response, _ = call(CL_CLI_CMD_BIND_RX, "")
+            assert response.ok and response.status == CL_CLI_STATUS_OK
+            assert response.text == "binding...", response.text
+            assert len(fc.bind_requests) == 1
+            assert fc.bind_requests[0][1] == ""
+
+            # save through the service (fake FC does not actually persist)
+            response, _ = call(CL_CLI_CMD_SAVE, "")
+            assert response.ok and response.status == CL_CLI_STATUS_OK
+            assert response.text == "saving...", response.text
+            assert fc.save_requests and fc.save_requests[-1][1] == ""
+            response, _ = call(CL_CLI_CMD_SAVE, "noreboot")
+            assert response.ok and fc.save_requests[-1][1] == "noreboot"
+
             # malformed request rejected before the link
             n_cli = len(fc.rx_cli)
             response, _ = call(9, "anything")
@@ -290,3 +315,63 @@ def test_cli_service_end_to_end(tmp_path, monkeypatch):
         executor.shutdown()
         node.destroy_node()
         rclpy.shutdown(context=context)
+
+
+def test_bind_rx_on_connect(tmp_path, monkeypatch):
+    """cli.bind_rx_on_connect:=true: once the link comes up, the node sends
+    bind_rx (0x24 cmd 3, empty args) exactly once per connection and logs
+    the FC's "binding..." confirmation; a reconnect triggers it again."""
+    monkeypatch.setenv("ROS_DOMAIN_ID", str(150 + os.getpid() % 60))
+    binary = Path(os.environ.get("APM_BRIDGE_TEST_BINARY",
+                  Path(__file__).resolve().parents[3] / "build/apm_bridge/custom_link_bridge_node"))
+    assert binary.is_file(), f"Build the bridge first: {binary}"
+
+    server = socket.socket()
+    server.bind(("127.0.0.1", 0))
+    server.listen()
+    server.settimeout(5)
+
+    process = connection = fc = None
+    log_path = tmp_path / "bridge.log"
+    try:
+        with log_path.open("w") as log:
+            process = subprocess.Popen([
+                str(binary), "--ros-args", "-p", "link.transport:=tcp",
+                "-p", f"link.tcp_port:={server.getsockname()[1]}",
+                "-p", "cli.bind_rx_on_connect:=true",
+            ], stdout=log, stderr=subprocess.STDOUT)
+            connection = server.accept()[0]
+            connection.setblocking(False)
+            fc = FakeFc(connection)
+
+            def pump(duration):
+                deadline = time.monotonic() + duration
+                while time.monotonic() < deadline:
+                    assert process.poll() is None, log_path.read_text()
+                    fc.pump()
+                    time.sleep(0.005)
+
+            # link up -> exactly one bind request with empty args + INFO log
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline and len(fc.bind_requests) < 1:
+                pump(0.05)
+            pump(1.0)  # allow late duplicates to surface
+            assert len(fc.bind_requests) == 1, fc.bind_requests
+            assert fc.bind_requests[0][1] == ""
+            log_text = log_path.read_text()
+            assert "RX bind started on connect (bind_rx): binding..." in log_text
+
+            # a reconnect fires it again (per-connection semantics)
+            connection.close()
+            fc.connection = connection = server.accept()[0]
+            connection.setblocking(False)
+            fc.buffer = b""
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline and len(fc.bind_requests) < 2:
+                pump(0.05)
+            assert len(fc.bind_requests) == 2, fc.bind_requests
+    finally:
+        shutdown(process)
+        if connection is not None:
+            connection.close()
+        server.close()

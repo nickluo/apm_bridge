@@ -437,7 +437,7 @@ namespace custom_link
     Client::CliResult Client::cliCommand(uint8_t cmd, const std::string &args, double timeout_s)
     {
         CliResult result;
-        if (cmd > protocol::CLI_CMD_INFO)
+        if (cmd > protocol::CLI_CMD_SAVE)
         {
             result.error = "bad request: unknown cmd";
             return result;

@@ -50,6 +50,15 @@ custom_link_bridge:
     rc:
       control_timeout: 0.5
 
+    cli:
+      # /fpv/cli 服务与连接触发动作的响应超时 (s)。
+      timeout_s: 3.0
+      # 每次与 FC 链路建立成功后，自动经 CLI 通道 (0x24 bind_rx) 让遥控
+      # 接收机进入配对模式。FC 成功应答 "binding..." 并记 INFO 日志；
+      # 被拒/失败记 WARN。换新遥控器/接收机配对时临时打开，平时保持
+      # false 以免每次上电都打断正常接收。
+      bind_rx_on_connect: false
+
     landed:
       airborne_altitude: 0.5
       landing_altitude: 0.2

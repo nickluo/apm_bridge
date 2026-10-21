@@ -62,6 +62,7 @@ CustomLinkVehicleNode::CustomLinkVehicleNode()
     this->declare_parameter<double>("link.diag_rate", 0.2);
     this->declare_parameter<double>("link.rate_limit_dps", 0.0);
     this->declare_parameter<double>("cli.timeout_s", 3.0); // /fpv/cli 响应超时
+    this->declare_parameter<bool>("cli.bind_rx_on_connect", false);
 
     this->declare_parameter<std::string>("imu.frame_id", "base_link");
     this->declare_parameter<double>("imu.orientation_stddev", 0.0);
@@ -82,6 +83,8 @@ CustomLinkVehicleNode::CustomLinkVehicleNode()
     this->get_parameter("voltage_compensation", voltage_compensation);
     this->get_parameter("baro_compensation", baro_compensation);
     this->get_parameter("cli.timeout_s", cli_timeout);
+    this->get_parameter("cli.timeout_s", cli_timeout);
+    this->get_parameter("cli.bind_rx_on_connect", cli_bind_rx_on_connect);
     if (baro_compensation)
         kp = kReferenceTemperatureKelvin / (kReferenceTemperatureKelvin + baro_temperature_c);
     this->get_parameter("motor_parameters.A", motor_params.A);
@@ -332,7 +335,20 @@ CustomLinkVehicleNode::CustomLinkVehicleNode()
 
     client->setLinkStateCallback([this](bool up) {
         if (up)
+        {
             RCLCPP_INFO(this->get_logger(), "Custom link up");
+            // cli.bind_rx_on_connect: 每次链路建立成功后让接收机进配对模式
+            //（0x24 CL_CLI_CMD_BIND_RX，同 CLI bind_rx）。请求由 CLI 工作线程
+            // 执行，这里只置标志并唤醒。持锁置位避免丢唤醒。
+            if (cli_bind_rx_on_connect)
+            {
+                {
+                    std::lock_guard<std::mutex> lk(cli_job_mtx);
+                    rx_bind_pending = true;
+                }
+                cli_job_cv.notify_one();
+            }
+        }
         else
             RCLCPP_WARN(this->get_logger(), "Custom link down");
     });
@@ -1110,8 +1126,8 @@ void CustomLinkVehicleNode::cliServiceCallback(
 {
     // 廉价校验在 executor 线程完成，坏请求立即回包不入队
     const char *bad = nullptr;
-    if (request->cmd > quadrotor_msgs::srv::CliCommand::Request::CMD_INFO)
-        bad = "bad request: cmd must be CMD_GET(0)/CMD_SET(1)/CMD_INFO(2)";
+    if (request->cmd > quadrotor_msgs::srv::CliCommand::Request::CMD_SAVE)
+        bad = "bad request: cmd must be CMD_GET(0)/CMD_SET(1)/CMD_INFO(2)/CMD_BIND_RX(3)/CMD_SAVE(4)";
     else if (request->args.size() + 1 > custom_link::protocol::CLI_MAX_ARGS)
         bad = "bad request: args too long (max 59 chars)";
     if (bad != nullptr)
@@ -1145,12 +1161,35 @@ void CustomLinkVehicleNode::cliServiceCallback(
     cliRespond(header, std::move(response));
 }
 
+void CustomLinkVehicleNode::maybeStartRxBind()
+{
+    if (!client)
+        return;
+    const auto result = client->cliCommand(custom_link::protocol::CLI_CMD_BIND_RX, "", cli_timeout);
+    if (result.ok && result.status == custom_link::protocol::CLI_STATUS_OK)
+        RCLCPP_INFO(this->get_logger(), "RX bind started on connect (bind_rx): %s", result.text.c_str());
+    else if (result.ok)
+        RCLCPP_WARN(this->get_logger(), "RX bind on connect rejected by FC: %s", result.text.c_str());
+    else
+        RCLCPP_WARN(this->get_logger(), "RX bind on connect failed: %s", result.error.c_str());
+}
+
 void CustomLinkVehicleNode::cliWorkerLoop()
 {
     std::unique_lock<std::mutex> lk(cli_job_mtx);
     while (cli_worker_running.load())
     {
-        cli_job_cv.wait(lk, [this] { return !cli_jobs.empty() || !cli_worker_running.load(); });
+        cli_job_cv.wait(lk, [this] {
+            return !cli_jobs.empty() || rx_bind_pending || !cli_worker_running.load();
+        });
+        // 连接触发的接收机配对（cli.bind_rx_on_connect）：优先于排队请求
+        if (rx_bind_pending)
+        {
+            rx_bind_pending = false;
+            lk.unlock();
+            maybeStartRxBind();
+            lk.lock();
+        }
         // 内层循环也要感知停止：FC 无响应时每个积压请求都吃满超时，
         // 析构 join 不能拖 kMaxQueue x cli_timeout；剩下的交给下面的
         // 关停排空快速回包
