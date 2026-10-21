@@ -293,6 +293,35 @@ ros2 topic pub --once /fpv/offboard std_msgs/msg/Bool "{data: true}"
 ros2 topic pub --once /fpv/offboard std_msgs/msg/Bool "{data: false}"
 ```
 
+### CLI read/write service (`/fpv/cli`)
+
+`quadrotor_msgs/srv/CliCommand` exposes the firmware settings table over the
+custom link (`0x24` up / `0x15` down, chunked responses) through the same
+engine the serial CLI and `MSP2_CLI_SETTING` use - identical name matching,
+range validation and `"name = value"` response text. `CMD_GET`/`CMD_SET`
+round-trip a setting (SET replies with the readback), `CMD_INFO` returns the
+metadata block (`pgn`, `type`, min/max or lookup `values`, `default`)
+reassembled from any number of 56-byte chunks. FC-side failures arrive as
+`ok=true, status=ERR` with the text (`SET FAILED`, `NOT FOUND`, ...); local
+failures (link down, `timeout`, `chunk gap`, `length mismatch`, bad request)
+as `ok=false` with `error`. Writes are RAM-only (CLI `set` without `save`)
+and revert on reboot; there is no armed guard, matching MSP - do not hold the
+service responsible for what you set in flight.
+
+```bash
+ros2 service call /fpv/cli quadrotor_msgs/srv/CliCommand \
+    "{cmd: 0, args: 'failsafe_delay'}"
+ros2 service call /fpv/cli quadrotor_msgs/srv/CliCommand \
+    "{cmd: 1, args: 'failsafe_delay = 20'}"
+```
+
+The service uses rclcpp's deferred-response pattern: the executor callback
+only queues the request and a dedicated worker thread blocks on the link
+response (`cli.timeout_s`, default 3 s), so a slow or timing-out call never
+stalls control/telemetry callbacks. Requests are serialized (the firmware
+keeps one in-flight response stream, last request wins); more than 8 queued
+requests get an immediate `busy` reply.
+
 Normal collective thrust is mass-normalized acceleration (m/s2); raw collective
 is BF normalized throttle. Arming, OFFBOARD, watchdog, pilot takeover and
 time synchronization retain the real custom-link client's semantics.

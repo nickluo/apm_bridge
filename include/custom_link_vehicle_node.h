@@ -10,6 +10,7 @@
 #include <geometry_msgs/msg/twist_stamped.hpp>
 #include "quadrotor_msgs/msg/control_command.hpp"
 #include "quadrotor_msgs/msg/low_level_feedback.hpp"
+#include "quadrotor_msgs/srv/cli_command.hpp"
 #include <mavros_msgs/msg/extended_state.hpp>
 #include <mavros_msgs/msg/gpsraw.hpp>
 #include <mavros_msgs/msg/rc_in.hpp>
@@ -26,9 +27,12 @@
 
 #include <array>
 #include <atomic>
+#include <condition_variable>
+#include <deque>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "custom_link/client.h"
@@ -108,6 +112,28 @@ namespace custom_link_bridge
         rclcpp::Subscription<geometry_msgs::msg::TwistStamped>::SharedPtr target_los_sub;
         rclcpp::Subscription<std_msgs::msg::Header>::SharedPtr gimbal_trigger_sub;
         rclcpp::TimerBase::SharedPtr gimbal_mode_timer;
+
+        // ---- CLI 设置读写服务 (/fpv/cli) ----
+        // 节点用单线程 executor：服务回调用 rclcpp 的延迟响应形式（只收
+        // header+request，由专职工作线程阻塞等待链路响应 0x24/0x15 后调
+        // send_response 回包），慢调用/超时不阻塞控制与遥测回调。
+        rclcpp::Service<quadrotor_msgs::srv::CliCommand>::SharedPtr cli_service;
+        struct CliJob
+        {
+            std::shared_ptr<rmw_request_id_t> header;
+            std::shared_ptr<quadrotor_msgs::srv::CliCommand::Request> request;
+        };
+        std::thread cli_worker;
+        std::mutex cli_job_mtx;
+        std::condition_variable cli_job_cv;
+        std::deque<CliJob> cli_jobs;
+        std::atomic_bool cli_worker_running{false};
+        double cli_timeout = 3.0;
+        void cliServiceCallback(const std::shared_ptr<rmw_request_id_t> header,
+                                const std::shared_ptr<quadrotor_msgs::srv::CliCommand::Request> request);
+        void cliWorkerLoop();
+        void cliRespond(const std::shared_ptr<rmw_request_id_t> header,
+                        std::shared_ptr<quadrotor_msgs::srv::CliCommand::Response> response);
         apm_bridge::GimbalModeSelector gimbal_mode_selector;
         apm_bridge::GimbalMode gimbal_mode = apm_bridge::GimbalMode::AIM;
         std::atomic_bool gimbal_aim_requested{false}, gimbal_abort_requested{false};

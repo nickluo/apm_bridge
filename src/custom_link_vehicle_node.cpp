@@ -61,6 +61,7 @@ CustomLinkVehicleNode::CustomLinkVehicleNode()
     this->declare_parameter<double>("link.sync_rate", 1.0);
     this->declare_parameter<double>("link.diag_rate", 0.2);
     this->declare_parameter<double>("link.rate_limit_dps", 0.0);
+    this->declare_parameter<double>("cli.timeout_s", 3.0); // /fpv/cli 响应超时
 
     this->declare_parameter<std::string>("imu.frame_id", "base_link");
     this->declare_parameter<double>("imu.orientation_stddev", 0.0);
@@ -80,6 +81,7 @@ CustomLinkVehicleNode::CustomLinkVehicleNode()
     this->get_parameter("channel_trigger", channel_trigger);
     this->get_parameter("voltage_compensation", voltage_compensation);
     this->get_parameter("baro_compensation", baro_compensation);
+    this->get_parameter("cli.timeout_s", cli_timeout);
     if (baro_compensation)
         kp = kReferenceTemperatureKelvin / (kReferenceTemperatureKelvin + baro_temperature_c);
     this->get_parameter("motor_parameters.A", motor_params.A);
@@ -379,6 +381,18 @@ CustomLinkVehicleNode::CustomLinkVehicleNode()
 
     client->start();
 
+    // CLI 设置读写服务：延迟响应回调（header+request），工作线程阻塞等
+    // 链路响应后 send_response 回包。必须在 client 就绪后创建（工作线程
+    // 直接使用 client），也保证析构时先停工作线程再停链路。
+    cli_service = this->create_service<quadrotor_msgs::srv::CliCommand>(
+        "/fpv/cli",
+        [this](const std::shared_ptr<rmw_request_id_t> header,
+               const std::shared_ptr<quadrotor_msgs::srv::CliCommand::Request> request) {
+            cliServiceCallback(header, request);
+        });
+    cli_worker_running = true;
+    cli_worker = std::thread(&CustomLinkVehicleNode::cliWorkerLoop, this);
+
     // 控制量推送：回调只写缓存，这里统一判新鲜度并转换体轴后下发。
     // 超时后只作废控制量，arm 请求不动（链路恢复后自动重试解锁边沿）。
     cmd_push_timer = this->create_wall_timer(control_period, [this]() { pushControl(); });
@@ -406,6 +420,13 @@ CustomLinkVehicleNode::CustomLinkVehicleNode()
 
 CustomLinkVehicleNode::~CustomLinkVehicleNode()
 {
+    {
+        std::lock_guard<std::mutex> lk(cli_job_mtx);
+        cli_worker_running = false;
+    }
+    cli_job_cv.notify_all();
+    if (cli_worker.joinable())
+        cli_worker.join();
     if (gimbal)
         gimbal->stop();
     if (client)
@@ -1061,6 +1082,110 @@ void CustomLinkVehicleNode::rcTriggerUpdate(const uint16_t *channels, size_t cou
     else if (channels[channel_trigger] < 1100)
     {
         toggled = false;
+    }
+}
+
+// ======================================================================
+// CLI 设置读写服务 (/fpv/cli)：延迟响应回调入队即返回，工作线程等链路
+// 响应后 send_response 回包——单线程 executor 不会被慢 CLI 调用/超时
+// 卡住控制与遥测。
+// ======================================================================
+
+void CustomLinkVehicleNode::cliRespond(const std::shared_ptr<rmw_request_id_t> header,
+                                       std::shared_ptr<quadrotor_msgs::srv::CliCommand::Response> response)
+{
+    try
+    {
+        cli_service->send_response(*header, *response);
+    }
+    catch (const std::exception &e)
+    {
+        RCLCPP_WARN(this->get_logger(), "CLI service response failed: %s", e.what());
+    }
+}
+
+void CustomLinkVehicleNode::cliServiceCallback(
+    const std::shared_ptr<rmw_request_id_t> header,
+    const std::shared_ptr<quadrotor_msgs::srv::CliCommand::Request> request)
+{
+    // 廉价校验在 executor 线程完成，坏请求立即回包不入队
+    const char *bad = nullptr;
+    if (request->cmd > quadrotor_msgs::srv::CliCommand::Request::CMD_INFO)
+        bad = "bad request: cmd must be CMD_GET(0)/CMD_SET(1)/CMD_INFO(2)";
+    else if (request->args.size() + 1 > custom_link::protocol::CLI_MAX_ARGS)
+        bad = "bad request: args too long (max 59 chars)";
+    if (bad != nullptr)
+    {
+        auto response = std::make_shared<quadrotor_msgs::srv::CliCommand::Response>();
+        response->ok = false;
+        response->error = bad;
+        cliRespond(header, std::move(response));
+        return;
+    }
+
+    bool queued = false;
+    {
+        std::lock_guard<std::mutex> lk(cli_job_mtx);
+        // 队列有界：请求方堆积过多直接回忙，而不是无限排队
+        constexpr size_t kMaxQueue = 8;
+        if (cli_jobs.size() < kMaxQueue)
+        {
+            cli_jobs.push_back(CliJob{header, request});
+            queued = true;
+        }
+    }
+    if (queued)
+    {
+        cli_job_cv.notify_one();
+        return; // 回包由工作线程延迟完成
+    }
+    auto response = std::make_shared<quadrotor_msgs::srv::CliCommand::Response>();
+    response->ok = false;
+    response->error = "busy: too many queued CLI requests";
+    cliRespond(header, std::move(response));
+}
+
+void CustomLinkVehicleNode::cliWorkerLoop()
+{
+    std::unique_lock<std::mutex> lk(cli_job_mtx);
+    while (cli_worker_running.load())
+    {
+        cli_job_cv.wait(lk, [this] { return !cli_jobs.empty() || !cli_worker_running.load(); });
+        // 内层循环也要感知停止：FC 无响应时每个积压请求都吃满超时，
+        // 析构 join 不能拖 kMaxQueue x cli_timeout；剩下的交给下面的
+        // 关停排空快速回包
+        while (!cli_jobs.empty() && cli_worker_running.load())
+        {
+            CliJob job = std::move(cli_jobs.front());
+            cli_jobs.pop_front();
+            lk.unlock();
+
+            auto result = custom_link::Client::CliResult{};
+            if (client)
+                result = client->cliCommand(job.request->cmd, job.request->args, cli_timeout);
+            else
+                result.error = "link not initialized";
+            auto response = std::make_shared<quadrotor_msgs::srv::CliCommand::Response>();
+            response->ok = result.ok;
+            response->status = result.status;
+            response->text = std::move(result.text);
+            response->error = std::move(result.error);
+            cliRespond(job.header, std::move(response));
+
+            lk.lock();
+        }
+    }
+    // 关停排空：仍在队列里的请求明确回包，客户端不至于悬挂等超时
+    while (!cli_jobs.empty())
+    {
+        CliJob job = std::move(cli_jobs.front());
+        cli_jobs.pop_front();
+        lk.unlock();
+        auto response = std::make_shared<quadrotor_msgs::srv::CliCommand::Response>();
+        response->ok = false;
+        response->error = "node shutting down";
+        cliRespond(job.header, std::move(response));
+        lk.lock();
     }
 }
 

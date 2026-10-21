@@ -15,6 +15,9 @@ custom_link_bridge_node over TCP, and finally exercises:
   7. arm-edge trigger   : STATUS_ARMED edges auto-publish /fpv/tracker_trigger
                           ON (props spinning -> tracker start) and OFF (props
                           stopped -> tracker + interceptor stop)
+  8. CLI read/write     : /fpv/cli service -> 0x24/0x15 -> the firmware's real
+                          settings engine: get/set/readback/restore, range and
+                          unknown-name errors, multi-chunk INFO reassembly
 
 Usage (workspace with apm_bridge built and sourced):
   python3 test/sitl_custom_link_test.py --binary <betaflight repo>/obj/betaflight_2026.6.1_SITL
@@ -37,6 +40,7 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy
 
 from mavros_msgs.msg import RCIn, State
 from quadrotor_msgs.msg import ControlCommand
+from quadrotor_msgs.srv import CliCommand
 from sensor_msgs.msg import Imu
 from std_msgs.msg import Bool, Header
 
@@ -140,6 +144,19 @@ class BridgeObserver(Node):
         self.arm_pub = self.create_publisher(Bool, "/fpv/arm", 10)
         self.cmd_pub = self.create_publisher(
             ControlCommand, "/fpv/control_command_raw", qos_be)
+        self.cli = self.create_client(CliCommand, "/fpv/cli")
+
+    def call_cli(self, cmd, args, timeout=6.0):
+        """Call /fpv/cli; returns the response or None on timeout. The node's
+        spin thread (started by the test) completes the future."""
+        request = CliCommand.Request()
+        request.cmd = cmd
+        request.args = args
+        future = self.cli.call_async(request)
+        deadline = time.monotonic() + timeout
+        while not future.done() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        return future.result() if future.done() else None
 
     def _trigger(self, msg):
         self.triggers.append((time.monotonic(), msg.frame_id))
@@ -189,6 +206,11 @@ def main():
     ap.add_argument("--workdir", default="/tmp/custom_link_sitl")
     args = ap.parse_args()
     binary = os.path.abspath(args.binary)
+
+    # 域隔离（可用 ROS_DOMAIN_ID 覆盖）：观测节点与被测桥必须同域，但不能
+    # 挂在环境默认域 0 上——幽灵 bridge/中继会把遥测翻倍、抢走 /fpv/cli 的
+    # 服务请求（SET 会写进别的 FC）。同仓库其他测试均自带隔离域。
+    os.environ.setdefault("ROS_DOMAIN_ID", "42")
 
     results = {}
 
@@ -387,6 +409,32 @@ def main():
             "tracker OFF on the disarm edge",
             lambda: observer.trigger_received("OFF", disarm_window), timeout=5)
         stream2.join(timeout=3)
+
+        print("== 8. CLI read/write service (/fpv/cli, disarmed) ==")
+        results["cli_service_up"] = wait_for(
+            "service available", lambda: observer.cli.service_is_ready(), timeout=15)
+        resp = observer.call_cli(CliCommand.Request.CMD_GET, "failsafe_delay")
+        results["cli_get"] = bool(resp and resp.ok and resp.status == 0
+                                  and resp.text.startswith("failsafe_delay = "))
+        orig = int(resp.text.split(" = ")[1]) if results["cli_get"] else 4
+        resp = observer.call_cli(CliCommand.Request.CMD_SET, f"failsafe_delay = {orig + 1}")
+        results["cli_set_readback"] = bool(
+            resp and resp.ok and resp.status == 0
+            and resp.text == f"failsafe_delay = {orig + 1}")
+        resp = observer.call_cli(CliCommand.Request.CMD_GET, "failsafe_delay")
+        results["cli_get_after_set"] = bool(
+            resp and resp.ok and resp.text == f"failsafe_delay = {orig + 1}")
+        observer.call_cli(CliCommand.Request.CMD_SET, f"failsafe_delay = {orig}")  # 还原
+        resp = observer.call_cli(CliCommand.Request.CMD_GET, "zzz_no_such_setting")
+        results["cli_not_found"] = bool(
+            resp and resp.ok and resp.status == 1 and resp.text == "NOT FOUND")
+        resp = observer.call_cli(CliCommand.Request.CMD_SET, "failsafe_delay = 999")
+        results["cli_range_rejected"] = bool(
+            resp and resp.ok and resp.status == 1 and resp.text == "SET FAILED")
+        resp = observer.call_cli(CliCommand.Request.CMD_INFO, "motor_pwm_protocol")
+        results["cli_info_chunked"] = bool(
+            resp and resp.ok and resp.status == 0 and "type=lookup" in resp.text
+            and len(resp.text) > 2 * 56)  # 136 B 响应 = 3 块分块重组
     finally:
         observer.destroy_node()
         rclpy.shutdown()

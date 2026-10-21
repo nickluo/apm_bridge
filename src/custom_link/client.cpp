@@ -85,6 +85,11 @@ namespace custom_link
             reader_thread_.join();
         if (sender_thread_.joinable())
             sender_thread_.join();
+        {
+            std::lock_guard<std::mutex> lk(cli_state_mtx_);
+            failCliPendingLocked("client stopped");
+        }
+        cli_cv_.notify_all();
         transport_->close();
         up_ = false;
     }
@@ -164,6 +169,13 @@ namespace custom_link
             if (got < 0)
             {
                 transport_->close();
+                // 链路中断时立刻叫醒在途 CLI 等待者，而不是等超时——
+                // 否则最常见的真实故障（USB 拔出/TCP 复位）被误报为 FC 慢
+                {
+                    std::lock_guard<std::mutex> lk(cli_state_mtx_);
+                    failCliPendingLocked("link down");
+                }
+                cli_cv_.notify_all();
                 if (up_.exchange(false) && link_cb_)
                     link_cb_(false);
                 continue;
@@ -362,8 +374,148 @@ namespace custom_link
                 }
             }
         }
+        if (frame.msgId == protocol::MSG_FC_CLI)
+        {
+            handleCliFrame(frame);
+            return; // CLI 响应在客户端内部消费，不进遥测回调
+        }
         if (telemetry_cb_)
             telemetry_cb_(frame, fcTs, hostUs);
+    }
+
+    // ------------------------------------------------------------------
+    // CLI 设置读写
+    // ------------------------------------------------------------------
+
+    void Client::failCliPendingLocked(const char *reason)
+    {
+        if (cli_pending_.reqId != 0 && !cli_pending_.done)
+        {
+            cli_pending_.error = reason;
+            cli_pending_.done = true;
+            cli_cv_.notify_all();
+        }
+    }
+
+    void Client::handleCliFrame(const protocol::Frame &frame)
+    {
+        // 载荷变长（8 + n），Frame::as<> 不适用，按字段手工解析
+        if (frame.len < 8)
+            return;
+        uint16_t reqId, total, offset;
+        std::memcpy(&reqId, &frame.payload[0], 2);
+        std::memcpy(&total, &frame.payload[2], 2);
+        std::memcpy(&offset, &frame.payload[4], 2);
+        const uint8_t status = frame.payload[6];
+        const uint8_t flags = frame.payload[7];
+        const char *data = reinterpret_cast<const char *>(frame.payload.data()) + 8;
+        const uint16_t dataLen = static_cast<uint16_t>(frame.len - 8);
+
+        std::lock_guard<std::mutex> lk(cli_state_mtx_);
+        if (cli_pending_.reqId == 0 || reqId != cli_pending_.reqId || cli_pending_.done)
+            return; // 迟到的旧响应块 / 已完成的响应
+        if (offset != static_cast<uint16_t>(cli_pending_.text.size()))
+        {
+            failCliPendingLocked("chunk gap");
+            return;
+        }
+        cli_pending_.text.append(data, dataLen);
+        cli_pending_.total = total;
+        cli_pending_.status = status;
+        if (!(flags & protocol::CLI_FLAG_MORE))
+        {
+            if (cli_pending_.text.size() != cli_pending_.total)
+                failCliPendingLocked("length mismatch");
+            else
+            {
+                cli_pending_.done = true;
+                cli_cv_.notify_all();
+            }
+        }
+    }
+
+    Client::CliResult Client::cliCommand(uint8_t cmd, const std::string &args, double timeout_s)
+    {
+        CliResult result;
+        if (cmd > protocol::CLI_CMD_INFO)
+        {
+            result.error = "bad request: unknown cmd";
+            return result;
+        }
+        if (args.size() + 1 > protocol::CLI_MAX_ARGS)
+        {
+            result.error = "bad request: args too long (max 59 chars)";
+            return result;
+        }
+        if (!up_.load())
+        {
+            result.error = "link down";
+            return result;
+        }
+
+        // FC 侧在途响应仅一条（新请求顶替旧的）：并发调用串行排队
+        const std::lock_guard<std::mutex> serial(cli_mtx_);
+
+        protocol::PayloadCliReq p{};
+        p.cmd = cmd;
+        p.reserved = 0;
+        std::memcpy(p.args, args.c_str(), args.size() + 1);
+        {
+            std::lock_guard<std::mutex> lk(cli_state_mtx_);
+            cli_req_id_ = static_cast<uint16_t>(cli_req_id_ + 1);
+            if (cli_req_id_ == 0)
+                cli_req_id_ = 1;               // 0 是"无在途请求"哨兵，永不分配
+            p.req_id = cli_req_id_;
+            cli_pending_ = {};
+            cli_pending_.reqId = p.req_id;
+        }
+
+        uint8_t buf[protocol::kFrameMax];
+        const uint8_t payloadLen = static_cast<uint8_t>(4 + args.size() + 1);
+        const uint8_t len = protocol::encode(protocol::MSG_HOST_CLI, 0, &p, payloadLen, buf, sizeof(buf));
+        if (len == 0)
+        {
+            result.error = "encode failed";
+            return result;
+        }
+        {
+            std::lock_guard<std::mutex> lk(write_mtx_);
+            if (!transport_->write(buf, len))
+            {
+                transport_->close();
+                up_ = false;
+                if (link_cb_)
+                    link_cb_(false);
+                result.error = "link down (write failed)";
+                return result;
+            }
+        }
+        {
+            std::lock_guard<std::mutex> lk(stats_mtx_);
+            ++stats_.tx_frames;
+        }
+
+        const auto deadline = std::chrono::steady_clock::now() +
+                               std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                                   std::chrono::duration<double>(timeout_s));
+        std::unique_lock<std::mutex> lk(cli_state_mtx_);
+        const bool done = cli_cv_.wait_until(lk, deadline, [this] { return cli_pending_.done; });
+        if (!done)
+        {
+            // 放弃等待：清掉在途标记，迟到的分块按 reqId 失配丢弃
+            cli_pending_.reqId = 0;
+            result.error = "timeout";
+            return result;
+        }
+        if (!cli_pending_.error.empty())
+        {
+            result.error = std::move(cli_pending_.error);
+            return result;
+        }
+        result.ok = true;
+        result.status = cli_pending_.status;
+        result.text = std::move(cli_pending_.text);
+        return result;
     }
 
     void Client::senderLoop()
@@ -449,7 +601,12 @@ namespace custom_link
         const uint8_t len = protocol::encode(protocol::MSG_HOST_CONTROL, 0, &p, sizeof(p), buf, sizeof(buf));
         if (len == 0)
             return false;
-        if (!transport_->write(buf, len))
+        bool wrote = false;
+        {
+            std::lock_guard<std::mutex> lk(write_mtx_);
+            wrote = transport_->write(buf, len);
+        }
+        if (!wrote)
         {
             transport_->close();
             up_ = false;
@@ -472,7 +629,12 @@ namespace custom_link
         const uint8_t len = protocol::encode(protocol::MSG_HOST_TIMESYNC, 0, &p, sizeof(p), buf, sizeof(buf));
         if (len == 0)
             return;
-        if (!transport_->write(buf, len))
+        bool wrote = false;
+        {
+            std::lock_guard<std::mutex> lk(write_mtx_);
+            wrote = transport_->write(buf, len);
+        }
+        if (!wrote)
         {
             transport_->close();
             up_ = false;

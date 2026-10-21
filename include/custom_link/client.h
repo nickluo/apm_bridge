@@ -9,6 +9,7 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -104,6 +105,18 @@ namespace custom_link
         /// 主动触发一次对时（另有周期性自动对时）。
         void requestTimeSync();
 
+        /// ---- CLI 设置读写 (0x24 上行 / 0x15 下行) ----
+        /// 阻塞直至响应分块收齐或超时；分块在读取线程重组。FC 侧在途响应
+        /// 仅一条（新请求顶替旧的），并发调用由内部互斥串行化。
+        struct CliResult
+        {
+            bool ok = false;          // 收到完整响应（含 FC 报错，看 status）
+            uint8_t status = 0;       // 协议 CLI_STATUS_*
+            std::string text;         // 重组后的响应文本
+            std::string error;        // ok=false 时的本地原因
+        };
+        CliResult cliCommand(uint8_t cmd, const std::string &args, double timeout_s);
+
         /// 把 FC 时间戳 (us, u32 回绕) 换算到主机墙钟 (us)。
         /// 时差模型无效时返回 hostClockUs()。
         int64_t fcToHostUs(uint32_t fcUs);
@@ -123,6 +136,8 @@ namespace custom_link
         void readerLoop();
         void senderLoop();
         void handleFrame(const protocol::Frame &frame, uint64_t completeUs);
+        void handleCliFrame(const protocol::Frame &frame);
+        void failCliPendingLocked(const char *reason);
         bool ensureOpen();
         bool sendControlFrame(bool arm, const ControlInput &input);
         void sendTimesync();
@@ -184,6 +199,25 @@ namespace custom_link
         uint16_t cmd_seq_ = 0;
         std::chrono::nanoseconds control_period_{std::chrono::milliseconds(10)};
         std::chrono::nanoseconds sync_period_{std::chrono::milliseconds(1000)};
+
+        // 所有 transport 写（发送线程 0x20/0x30 与调用线程 0x24）串行化
+        std::mutex write_mtx_;
+
+        // CLI 请求/响应：cli_mtx_ 串行化并发调用；cli_state_mtx_ + cv 在
+        // 调用线程（等待）与读取线程（收块）之间交接单条在途响应
+        std::mutex cli_mtx_;
+        std::mutex cli_state_mtx_;
+        std::condition_variable cli_cv_;
+        uint16_t cli_req_id_ = 0;       // 持 cli_mtx_ 递增，0 永不分配
+        struct
+        {
+            uint16_t reqId = 0;         // 0 = 无在途请求（迟到的旧块被忽略）
+            std::string text;
+            uint16_t total = 0;
+            uint8_t status = 0;
+            bool done = false;
+            std::string error;
+        } cli_pending_;                 // 持 cli_state_mtx_
 
         // 时间同步（读取线程写，任意线程读；互斥保护）
         mutable std::mutex sync_mtx_;

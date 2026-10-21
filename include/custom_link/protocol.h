@@ -29,7 +29,9 @@ namespace custom_link
             MSG_FC_MEDIUM = 0x11,      // 100 Hz baro/temp/rc
             MSG_FC_SLOW = 0x12,        // 10 Hz battery/gps/modes/status
             MSG_FC_ODOMETRY = 0x14,    // 100 Hz GPS-valid ARM-relative ENU odometry
+            MSG_FC_CLI = 0x15,         // CLI 设置读写响应（分块）
             MSG_HOST_CONTROL = 0x20,   // host -> FC control setpoints
+            MSG_HOST_CLI = 0x24,       // host -> FC CLI 设置读写请求
             MSG_HOST_TIMESYNC = 0x30,  // host -> FC time sync request (u64 T1)
             MSG_FC_TIMESYNC = 0x31,    // FC -> host time sync response
         };
@@ -109,6 +111,28 @@ namespace custom_link
             uint32_t t2_isr_us;        // FC RX ISR 时间戳
             uint32_t t3_tx_us;         // FC 发送前时间戳
         };
+
+        // ---- CLI 设置读写通道 (0x24 上行 / 0x15 下行) ----
+        // 请求载荷变长（args NUL 结尾，帧长 = 4 + strlen + 1），响应载荷变长
+        //（帧长 = 8 + n），都不能用 Frame::as<T>()（其要求 len == sizeof(T)），
+        // 需按字段手工解析。
+        struct PayloadCliReq
+        {
+            uint16_t req_id;           // 回显在响应中，用于配对
+            uint8_t cmd;               // CLI_CMD_*
+            uint8_t reserved;          // 必须为 0
+            char args[60];             // NUL 结尾：GET/INFO 设置名，SET "name = value"
+        };
+
+        struct PayloadCliResp
+        {
+            uint16_t req_id;
+            uint16_t total_len;        // 完整响应文本长度
+            uint16_t offset;           // data[0] 在完整文本中的偏移
+            uint8_t status;            // CLI_STATUS_*
+            uint8_t flags;             // CLI_FLAG_MORE：后续还有分块
+            char data[56];
+        };
 #pragma pack(pop)
 
         static_assert(sizeof(PayloadFast) == 22, "fast payload size");
@@ -118,6 +142,17 @@ namespace custom_link
         static_assert(sizeof(PayloadOdometry) == 64, "odometry payload size");
         static_assert(sizeof(PayloadTimesyncReq) == 8, "timesync req size");
         static_assert(sizeof(PayloadTimesyncResp) == 16, "timesync resp size");
+        static_assert(sizeof(PayloadCliReq) == 64, "cli req size");
+        static_assert(sizeof(PayloadCliResp) == 64, "cli resp size");
+
+        constexpr uint8_t CLI_CMD_GET = 0;    // args = 设置名 -> "name = value"
+        constexpr uint8_t CLI_CMD_SET = 1;    // args = "name = value" -> 成功回读
+        constexpr uint8_t CLI_CMD_INFO = 2;   // args = 设置名 -> 元数据（分块）
+        constexpr uint8_t CLI_STATUS_OK = 0;
+        constexpr uint8_t CLI_STATUS_ERR = 1; // data 为错误文本
+        constexpr uint8_t CLI_FLAG_MORE = 0x01;
+        constexpr uint8_t CLI_MAX_ARGS = 60;  // args 域字节上限（含 NUL）
+        constexpr uint8_t CLI_MAX_DATA = 56;  // 响应分块数据上限
 
         constexpr uint16_t STATUS_ARMED = 0x0001;
         constexpr uint16_t STATUS_FAILSAFE = 0x0002;
