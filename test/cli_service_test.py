@@ -28,6 +28,7 @@ from rclpy.executors import SingleThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy
 from mavros_msgs.msg import RCIn
+from std_msgs.msg import Bool
 from quadrotor_msgs.srv import CliCommand
 
 from sitl_odometry_test import encode, shutdown
@@ -47,6 +48,7 @@ class FakeFc:
         self.rx_cli = []          # (req_id, cmd, args) as received
         self.bind_requests = []   # (req_id, args) for cmd 3
         self.save_requests = []   # (req_id, args) for cmd 4
+        self.mode_reqs = []       # mode_req of every 0x20 seen
         self.seq = 0
 
     def pump(self):
@@ -78,6 +80,8 @@ class FakeFc:
             self.buffer = self.buffer[7 + length:]
             if msg_id == 0x24:
                 self.handle_cli(payload)
+            elif msg_id == 0x20 and length == 20:
+                self.mode_reqs.append(payload[11])  # arm u8@10, mode_req u8@11
 
     def handle_cli(self, payload):
         req_id = struct.unpack_from("<H", payload, 0)[0]
@@ -294,6 +298,26 @@ def test_cli_service_end_to_end(tmp_path, monkeypatch):
             assert fc.save_requests and fc.save_requests[-1][1] == ""
             response, _ = call(CL_CLI_CMD_SAVE, "noreboot")
             assert response.ok and fc.save_requests[-1][1] == "noreboot"
+
+            # repeated offboard true: the bridge must emit a fresh 0->2 edge
+            # (one mode_req=0 frame followed by 2s) so the FC-side apiBlocked
+            # unlocks on a re-request
+            offb_pub = node.create_publisher(Bool, "/custom_link_bridge/offboard", 10)
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline and offb_pub.get_subscription_count() < 1:
+                pump(0.05)
+            fc.mode_reqs.clear()
+            offb_pub.publish(Bool(data=True))
+            pump(0.5)
+            assert fc.mode_reqs and all(m == 2 for m in fc.mode_reqs), fc.mode_reqs
+            fc.mode_reqs.clear()
+            offb_pub.publish(Bool(data=True))    # repeat true == re-request
+            pump(1.0)
+            assert 0 in fc.mode_reqs, f"no 0->2 edge: {fc.mode_reqs}"
+            z = fc.mode_reqs.index(0)
+            assert fc.mode_reqs[z + 1:] and all(m == 2 for m in fc.mode_reqs[z + 1:]), \
+                fc.mode_reqs
+            assert fc.mode_reqs[-1] == 2
 
             # malformed request rejected before the link
             n_cli = len(fc.rx_cli)

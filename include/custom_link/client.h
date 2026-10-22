@@ -100,6 +100,8 @@ namespace custom_link
 
         /// 显式模式请求：发送一次 0x20（即使无控制量），随后控制帧沿用该模式。
         /// 不改变 arm 请求，也不替代持续控制流/FC 看门狗。
+        /// 重复 setOffboardRequest(true) 会自动产生一次 mode_req 0->2 新边沿
+        ///（先发一帧 0 再回 2），等价于重新请求——用于解锁 FC 侧 apiBlocked。
         void setOffboardRequest(bool offboard);
 
         /// 主动触发一次对时（另有周期性自动对时）。
@@ -190,6 +192,7 @@ namespace custom_link
         ControlInput cmd_;
         bool cmd_valid_ = false;
         std::optional<uint8_t> mode_request_;
+        bool rearm_pending_ = false;      // 持 cmd_mtx_：重复 true 的 0->2 边沿在途
         uint64_t mode_request_revision_ = 0;
         uint64_t mode_request_sent_revision_ = 0;
         std::atomic_bool arm_request_{false};

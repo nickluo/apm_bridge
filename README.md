@@ -285,8 +285,11 @@ change the host arm bit, and do not keep stale control commands alive: maintain
 a fresh control stream while in OFFBOARD. The actual result is reported by
 `/mavros/state`, subject to firmware safety and pilot/Rescue arbitration.
 The pilot's held OFFBOARD AUX switch takes priority over an API manual request.
-After pilot takeover, deliberately request `false`, then `true` to enter a
-new API session.
+After a pilot takeover or a pilot mode change during host control, re-issuing
+`true` is enough to enter a new API session: the bridge automatically emits a
+fresh `mode_req` 0->2 edge (a pending request is not defeated by incidental
+pilot dial sweeps; the latch only applies while the host is actively
+controlling).
 
 ```bash
 ros2 topic pub --once /fpv/offboard std_msgs/msg/Bool "{data: true}"

@@ -104,6 +104,15 @@ namespace custom_link
     void Client::setOffboardRequest(bool offboard)
     {
         std::lock_guard<std::mutex> lk(cmd_mtx_);
+        if (offboard && mode_request_ && *mode_request_ == 2)
+        {
+            // 重复 true = 重新请求：FC 侧解锁 apiBlocked 需要 mode_req 新
+            // 边沿，仅重发 2 不产生边沿。置 rearm_pending_，发送线程先发
+            // 一帧 mode_req=0 再回到 2（0 -> 2 即新请求）。
+            rearm_pending_ = true;
+            ++mode_request_revision_;
+            return;
+        }
         mode_request_ = offboard ? 2 : 0;
         ++mode_request_revision_;
     }
@@ -546,6 +555,7 @@ namespace custom_link
                     ControlInput input;
                     bool valid = false;
                     bool mode_pending = false;
+                    bool send_rearm = false;
                     uint64_t mode_revision = 0;
                     {
                         std::lock_guard<std::mutex> lk(cmd_mtx_);
@@ -555,6 +565,11 @@ namespace custom_link
                             input.mode_req = *mode_request_;
                         mode_revision = mode_request_revision_;
                         mode_pending = mode_revision != mode_request_sent_revision_;
+                        if (mode_pending && rearm_pending_)
+                        {
+                            input.mode_req = 0;   // 撤销帧：为 0->2 新边沿铺路
+                            send_rearm = true;
+                        }
                         if (mode_pending && !valid)
                         {
                             input.throttle = 0.0;
@@ -573,6 +588,14 @@ namespace custom_link
                         {
                             std::lock_guard<std::mutex> lk(cmd_mtx_);
                             mode_request_sent_revision_ = mode_revision;
+                            if (send_rearm)
+                            {
+                                // 撤销帧已上线：立即回到 2 并再触发一次发送，
+                                // FC 侧即见到 0 -> 2 新请求边沿
+                                rearm_pending_ = false;
+                                mode_request_ = 2;
+                                ++mode_request_revision_;
+                            }
                         }
                     }
                 }
