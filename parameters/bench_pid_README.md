@@ -81,12 +81,18 @@ source install/setup.bash
 ros2 launch apm_bridge bench_pid.launch.py
 ```
 
-复制并评审参数文件，确认测试架后，才将这两个值改为 `true`，通过绝对路径加载：
+复制并评审参数文件，确认测试架后，通过 launch 参数显式启用，无需修改 YAML：
 
 ```bash
-ros2 launch apm_bridge bench_pid.launch.py parameters:=/绝对路径/bench_pid.yaml
+ros2 launch apm_bridge bench_pid.launch.py \
+  parameters:=/绝对路径/bench_pid.yaml enabled:=true rig_confirmed:=true
 ros2 topic echo /bench_pid_tuner/status
 ```
+
+`enabled`、`rig_confirmed` 两个 launch 参数均默认为 `false`，以布尔类型覆盖 YAML
+中的同名值；即使 YAML 为 `true`，未显式传入启动参数仍保持禁用。支持分别设置
+`enabled:=false` 或 `rig_confirmed:=false`，且只有两者都为 `true` 才允许整定。
+其它参数仍从 `parameters` 指定的 YAML 加载。
 
 `rig_confirmed` 只是人工确认项，**不是物理互锁传感器**。
 

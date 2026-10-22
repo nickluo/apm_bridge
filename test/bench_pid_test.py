@@ -21,6 +21,37 @@ import bench_pid_core
 CLI_GAINS = {"roll": Gains(43, 60, 20), "pitch": Gains(40, 58, 19), "yaw": Gains(30, 0, 0)}
 
 
+@pytest.mark.parametrize("overrides,expected", [
+    ({}, (False, False)),
+    ({"enabled": "true"}, (True, False)),
+    ({"rig_confirmed": "true"}, (False, True)),
+    ({"enabled": "true", "rig_confirmed": "true"}, (True, True)),
+    ({"enabled": "false", "rig_confirmed": "false"}, (False, False)),
+])
+def test_launch_interlocks_override_yaml_as_booleans(tmp_path, overrides, expected):
+    import runpy
+    import yaml
+    from launch import LaunchContext
+    from launch.actions import DeclareLaunchArgument
+    from launch_ros.utilities import evaluate_parameters, normalize_parameters
+
+    config = tmp_path / "bench.yaml"
+    config.write_text(yaml.safe_dump({"bench_pid_tuner": {"ros__parameters": {
+        "enabled": not expected[0], "rig_confirmed": not expected[1], "tuning_channel": 11}}}))
+    context = LaunchContext()
+    context.launch_configurations.update(parameters=str(config), **overrides)
+    with patch("launch_ros.actions.Node") as node_factory:
+        module = runpy.run_path(str(Path(__file__).resolve().parents[1] / "launch/bench_pid.launch.py"))
+        description = module["generate_launch_description"]()
+    for action in description.entities:
+        if isinstance(action, DeclareLaunchArgument):
+            action.execute(context)
+    evaluated = evaluate_parameters(context, normalize_parameters(node_factory.call_args.kwargs["parameters"]))
+    assert evaluated[0] == config
+    assert evaluated[1] == {"enabled": expected[0], "rig_confirmed": expected[1]}
+    assert all(type(value) is bool for value in evaluated[1].values())
+
+
 def test_cli_export_contains_exact_profile_and_all_selected_gains_without_save():
     text = bench_pid_core.render_cli("2", CLI_GAINS)
     commands = [line for line in text.splitlines() if line and not line.startswith("#")]
