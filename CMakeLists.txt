@@ -106,12 +106,16 @@ install(DIRECTORY
 install(PROGRAMS scripts/sitl_motor_calibration.py
   DESTINATION lib/${PROJECT_NAME} RENAME sitl_motor_calibration)
 install(FILES scripts/sitl_support.py DESTINATION lib/${PROJECT_NAME})
+install(PROGRAMS scripts/bench_pid_tuner.py
+  DESTINATION lib/${PROJECT_NAME} RENAME bench_pid_tuner)
+install(FILES scripts/bench_pid_core.py DESTINATION lib/${PROJECT_NAME})
 
 if(BUILD_TESTING)
   add_executable(gimbal_tracking_test test/gimbal_tracking_test.cpp)
   add_test(NAME gimbal_tracking_test COMMAND gimbal_tracking_test)
   find_package(ament_cmake_pytest REQUIRED)
   ament_add_pytest_test(sitl_bridge_test test/sitl_bridge_test.py)
+  ament_add_pytest_test(bench_pid_test test/bench_pid_test.py TIMEOUT 120)
   ament_add_pytest_test(gimbal_node_test test/gimbal_node_test.py TIMEOUT 30)
   set_tests_properties(gimbal_node_test PROPERTIES
     ENVIRONMENT "APM_BRIDGE_TEST_BINARY=$<TARGET_FILE:custom_link_bridge_node>")

@@ -1,0 +1,19 @@
+bench_pid_tuner:
+  ros__parameters:
+    # Software and mechanical interlocks; both must be explicitly enabled.
+    enabled: false
+    rig_confirmed: false
+    axes: [roll, pitch, yaw]
+    # Zero-based RC index, like bridge channel_trigger: 8 = CH9 / AUX5.
+    tuning_channel: 8
+    # Raw normalized throttle, NOT m/s^2. Set using a prior propulsion/rig review.
+    throttle: 0.12
+    rate_dps: 5.0
+    pulse_s: 0.3
+    tail_s: 0.8
+    max_tilt_deg: 15.0
+    max_rate_dps: 40.0
+    max_gain_change: 3
+    improvement: 0.10
+    timeout_s: 180.0
+    output_dir: ~/.ros/bench_pid

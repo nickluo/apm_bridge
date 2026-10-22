@@ -35,6 +35,7 @@ from sitl_odometry_test import encode, shutdown
 
 SYNC = b"\xeb\x90"
 CL_CLI_CMD_GET, CL_CLI_CMD_SET, CL_CLI_CMD_INFO, CL_CLI_CMD_BIND_RX, CL_CLI_CMD_SAVE = 0, 1, 2, 3, 4
+CL_CLI_CMD_APPLY_PID = 5
 CL_CLI_STATUS_OK, CL_CLI_STATUS_ERR = 0, 1
 CL_CLI_FLAG_MORE = 0x01
 
@@ -130,6 +131,8 @@ class FakeFc:
         elif cmd == CL_CLI_CMD_SAVE:
             self.save_requests.append((req_id, args))
             self.respond(req_id, CL_CLI_STATUS_OK, "saving...")
+        elif cmd == CL_CLI_CMD_APPLY_PID:
+            self.respond(req_id, CL_CLI_STATUS_OK, "PID PROFILE 0")
 
     def respond(self, req_id, status, text):
         data = text.encode()
@@ -298,6 +301,10 @@ def test_cli_service_end_to_end(tmp_path, monkeypatch):
             assert fc.save_requests and fc.save_requests[-1][1] == ""
             response, _ = call(CL_CLI_CMD_SAVE, "noreboot")
             assert response.ok and fc.save_requests[-1][1] == "noreboot"
+            response, _ = call(CL_CLI_CMD_APPLY_PID, "check")
+            assert response.ok and response.text == "PID PROFILE 0"
+            response, _ = call(CL_CLI_CMD_APPLY_PID, "0")
+            assert response.ok and fc.rx_cli[-1][1:] == (CL_CLI_CMD_APPLY_PID, "0")
 
             # repeated offboard true: the bridge must emit a fresh 0->2 edge
             # (one mode_req=0 frame followed by 2s) so the FC-side apiBlocked

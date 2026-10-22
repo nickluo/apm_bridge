@@ -1126,8 +1126,8 @@ void CustomLinkVehicleNode::cliServiceCallback(
 {
     // 廉价校验在 executor 线程完成，坏请求立即回包不入队
     const char *bad = nullptr;
-    if (request->cmd > quadrotor_msgs::srv::CliCommand::Request::CMD_SAVE)
-        bad = "bad request: cmd must be CMD_GET(0)/CMD_SET(1)/CMD_INFO(2)/CMD_BIND_RX(3)/CMD_SAVE(4)";
+    if (request->cmd > quadrotor_msgs::srv::CliCommand::Request::CMD_APPLY_PID)
+        bad = "bad request: unknown CLI command";
     else if (request->args.size() + 1 > custom_link::protocol::CLI_MAX_ARGS)
         bad = "bad request: args too long (max 59 chars)";
     if (bad != nullptr)

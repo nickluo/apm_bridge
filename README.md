@@ -272,6 +272,14 @@ callback and prevents further publications until restarted.
 
 ## Preserved interfaces
 
+For an opt-in captive three-axis rig experiment controlled by the zero-based
+`tuning_channel` parameter (default 8 = CH9), see
+[bench PID tuning](parameters/bench_pid_README.md) and
+[the disabled-by-default parameters](parameters/bench_pid.yaml).
+It never arms or saves the FC. Runtime PID application requires the matching
+firmware/service extension; ordinary CLI SET readback alone is not proof that
+the running PID coefficients changed.
+
 The existing `/fpv/control_command`, `/fpv/control_command_raw`, `/fpv/arm`,
 `/fpv/low_level_feedback` and MAVROS-compatible telemetry interfaces are reused.
 `/fpv/offboard` (`std_msgs/msg/Bool`, private name `~/offboard`) independently

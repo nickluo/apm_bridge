@@ -11,7 +11,7 @@ custom_link_bridge:
     voltage_compensation: true
     baro_compensation: true
 
-    channel_trigger: 9
+    channel_trigger: 9 # CH10 / AUX6 zero-based MISSION trigger channel
 
     # vbat 电压补偿模型 (lyrical 分支台架拟合, 6S 口径, V_ref = 6*3.7 = 22.2V):
     # vbat_a = 0 (默认) 时未启用, 退回线性 volt_max/V 补偿, 行为与旧版一致。

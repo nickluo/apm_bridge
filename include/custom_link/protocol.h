@@ -150,6 +150,7 @@ namespace custom_link
         constexpr uint8_t CLI_CMD_INFO = 2;   // args = 设置名 -> 元数据（分块）
         constexpr uint8_t CLI_CMD_BIND_RX = 3; // 无 args -> "binding..."（同 CLI bind_rx，接收机进配对）
         constexpr uint8_t CLI_CMD_SAVE = 4;    // 空 args=持久化+重启（同 CLI save）；"noreboot"=仅持久化 -> "saving..."
+        constexpr uint8_t CLI_CMD_APPLY_PID = 5; // check / expected profile; zero-output runtime PID refresh
         constexpr uint8_t CLI_STATUS_OK = 0;
         constexpr uint8_t CLI_STATUS_ERR = 1; // data 为错误文本
         constexpr uint8_t CLI_FLAG_MORE = 0x01;
