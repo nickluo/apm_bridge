@@ -103,6 +103,40 @@ namespace
                 "absent yaw motor incorrectly limited single-axis pitch tracking");
     }
 
+    void angleTrajectories()
+    {
+        apm_bridge::GimbalTrackingConfig config;
+        config.max_rate_dps = 140;
+        config.max_accel_dps2 = 600;
+        apm_bridge::GimbalAngleTrajectory trajectory(config);
+        const std::array<bool, 3> axes{false, true, false};
+        trajectory.reset({0, 0, 0});
+        for (double target : {80.0, 0.0, -110.0, 110.0, 0.0})
+        {
+            for (int i = 0; i < 400; ++i)
+            {
+                const double dt = i % 2 ? .017 : .027;
+                const auto before = trajectory.positions();
+                const auto rate_before = trajectory.rates();
+                const auto after = trajectory.step({40, target, 60}, dt, axes);
+                require(after[0] == 0 && after[2] == 0, "angle trajectory moved an absent axis");
+                require(std::abs(after[1] - before[1]) <= config.max_rate_dps * dt + 1e-10,
+                        "angle setpoint teleported");
+                require(std::abs(trajectory.rates()[1] - rate_before[1]) <= config.max_accel_dps2 * dt + 1e-10,
+                        "angle trajectory acceleration discontinuity");
+            }
+            require(std::abs(trajectory.positions()[1] - target) < .001, "angle trajectory did not settle");
+        }
+        trajectory.reset({0, 10, 0}, {0, 140, 0});
+        const auto moving = trajectory.rates()[1];
+        trajectory.step({0, -80, 0}, .02, axes);
+        require(std::abs(trajectory.rates()[1] - moving) <= 12.000001, "moving rate-to-angle transition reset velocity");
+        trajectory.reset({0, 119.99, 0}, {0, 140, 0});
+        trajectory.step({0, 120, 0}, .02, axes);
+        trajectory.constrain(1, -120, 120);
+        require(trajectory.positions()[1] <= 120 && trajectory.rates()[1] == 0, "angle trajectory ignored mechanical stop");
+    }
+
     void noisyRateFeedforward()
     {
         apm_bridge::GimbalTrackingConfig config;
@@ -132,6 +166,7 @@ int main()
         rates();
         sphericalRateMapping();
         noisyRateFeedforward();
+        angleTrajectories();
         std::cout << "PASS: gimbal states, zero-centered MISSION, feedforward, timeout, filtering and rate limits\n";
         return 0;
     }

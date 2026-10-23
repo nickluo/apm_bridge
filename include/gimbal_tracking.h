@@ -51,6 +51,61 @@ namespace apm_bridge
         }
     };
 
+    class GimbalAngleTrajectory
+    {
+    public:
+        explicit GimbalAngleTrajectory(const GimbalTrackingConfig &config) : cfg_(config) { cfg_.validate(); }
+
+        void reset(const std::array<double, 3> &degrees, const std::array<double, 3> &rates = {})
+        {
+            position_ = degrees;
+            for (size_t i = 0; i < rate_.size(); ++i)
+                rate_[i] = std::clamp(rates[i], -cfg_.max_rate_dps, cfg_.max_rate_dps);
+        }
+
+        std::array<double, 3> step(const std::array<double, 3> &target, double dt,
+                                   const std::array<bool, 3> &axes)
+        {
+            if (!std::isfinite(dt) || dt <= 0)
+                throw std::invalid_argument("Invalid gimbal angle trajectory step");
+            for (size_t i = 0; i < position_.size(); ++i)
+            {
+                if (!axes[i])
+                {
+                    position_[i] = rate_[i] = 0;
+                    continue;
+                }
+                const double error = target[i] - position_[i];
+                const double brake_step = cfg_.max_accel_dps2 * dt;
+                const double braking = std::sqrt(brake_step * brake_step +
+                    2 * cfg_.max_accel_dps2 * std::abs(error)) - brake_step;
+                const double desired = std::copysign(std::min({cfg_.max_rate_dps, braking, 8 * std::abs(error)}), error);
+                const double previous = rate_[i];
+                rate_[i] += std::clamp(desired - rate_[i], -cfg_.max_accel_dps2 * dt, cfg_.max_accel_dps2 * dt);
+                position_[i] += (previous + rate_[i]) * .5 * dt;
+            }
+            return position_;
+        }
+
+        void constrain(size_t axis, double lower, double upper)
+        {
+            if (lower >= upper)
+                return;
+            position_[axis] = std::clamp(position_[axis], lower, upper);
+            if ((position_[axis] <= lower && rate_[axis] < 0) ||
+                (position_[axis] >= upper && rate_[axis] > 0))
+                rate_[axis] = 0; // Mechanical stops override acceleration continuity.
+        }
+
+        const std::array<double, 3> &rates() const { return rate_; }
+        const std::array<double, 3> &positions() const { return position_; }
+
+    private:
+        GimbalTrackingConfig cfg_;
+        std::array<double, 3> position_{};
+        std::array<double, 3> rate_{};
+    };
+
     class GimbalTrackingController
     {
     public:

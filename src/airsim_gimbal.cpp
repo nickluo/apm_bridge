@@ -171,24 +171,6 @@ namespace custom_link_bridge
                 tf2::Quaternion(tf2::Vector3(1, 0, 0), bank);
         }
 
-        tf2::Quaternion limitRelative(const tf2::Quaternion &relative)
-        {
-            double roll, pitch, yaw;
-            tf2::Matrix3x3(relative).getRPY(roll, pitch, yaw);
-            const auto limit = [](double angle, const xfrobot::GimbalAxisConfig &axis, double sign) {
-                if (!axis.present)
-                    return 0.0;
-                if (axis.min_deg == axis.max_deg)
-                    return angle;
-                return sign * std::clamp(sign * angle * 180.0 / M_PI,
-                    double(axis.min_deg), double(axis.max_deg)) * M_PI / 180.0;
-            };
-            tf2::Quaternion result;
-            result.setRPY(limit(roll, cfg_.roll, 1), limit(pitch, cfg_.pitch, -1),
-                          limit(yaw, cfg_.yaw, -1));
-            return result;
-        }
-
         void run()
         {
             rpc::client client(host_, static_cast<uint16_t>(port_));
@@ -199,6 +181,8 @@ namespace custom_link_bridge
             double last_control_time = node_.now().seconds();
             std::optional<tf2::Vector3> mount_position;
             auto previous_mode = mode_.load();
+            apm_bridge::GimbalAngleTrajectory trajectory(cfg_.tracking);
+            bool trajectory_ready = false;
             while (running_)
             {
                 try
@@ -207,17 +191,30 @@ namespace custom_link_bridge
                     const auto camera_stamp = node_.now();
                     const auto info = response.get().as<ObjectMap>();
                     const auto pose = info.at("pose").as<ObjectMap>();
-                    const tf2::Quaternion enu = nedToEnu(readQuaternion(pose));
+                    tf2::Quaternion enu = nedToEnu(readQuaternion(pose));
                     const auto vehicle_response = client.call("simGetVehiclePose", vehicle_);
                     const auto vehicle_pose = vehicle_response.get().as<ObjectMap>();
                     const auto body_ned = readQuaternion(vehicle_pose);
                     const auto body = nedToEnu(body_ned);
+                    const apm_bridge::GimbalAxes axes{cfg_.roll.present, cfg_.pitch.present, cfg_.yaw.present};
+                    enu = apm_bridge::gimbalCameraToWorld(body,
+                        apm_bridge::gimbalJointAngles(body.inverse() * enu, axes), axes);
                     if (!mount_position)
                         mount_position = tf2::quatRotate(body_ned.inverse(),
                             readPosition(pose) - readPosition(vehicle_pose));
                     const double control_time = node_.now().seconds();
-                    const double dt = std::clamp(control_time - last_control_time, 0.0, 0.1);
+                    const double elapsed = control_time - last_control_time;
+                    const double dt = std::clamp(elapsed, 0.0, 0.1);
                     last_control_time = control_time;
+                    auto measured_joints = apm_bridge::gimbalJointAngles(body.inverse() * enu, axes);
+                    for (auto &value : measured_joints)
+                        value *= 180 / M_PI;
+                    if (!trajectory_ready || elapsed <= 0 || elapsed > .3)
+                    {
+                        trajectory.reset(measured_joints);
+                        trajectory_ready = true;
+                        previous.reset();
+                    }
                     const auto mode = mode_.load();
                     if (mode != previous_mode)
                     {
@@ -236,9 +233,9 @@ namespace custom_link_bridge
                     const bool protection = cfg_.model == xfrobot::GimbalModel::C20S && roll_hold_active_;
                     tf2::Quaternion relative(0, 0, 0, 1);
                     if (mode == apm_bridge::GimbalMode::AIM)
-                        relative = tf2::Quaternion(tf2::Vector3(0, 0, 1), -aim_target_degrees_[2] * M_PI / 180.0) *
-                            tf2::Quaternion(tf2::Vector3(1, 0, 0), aim_target_degrees_[0] * M_PI / 180.0) *
-                            tf2::Quaternion(tf2::Vector3(0, 1, 0), -aim_target_degrees_[1] * M_PI / 180.0);
+                        relative = apm_bridge::gimbalCameraToWorld(tf2::Quaternion(0, 0, 0, 1),
+                            {aim_target_degrees_[0] * M_PI / 180, aim_target_degrees_[1] * M_PI / 180,
+                             aim_target_degrees_[2] * M_PI / 180}, axes);
                     else if (mode == apm_bridge::GimbalMode::HORIZON)
                         relative = body.inverse() * (protection ? enu : horizonOrientation(body));
                     else if (mode == apm_bridge::GimbalMode::MISSION)
@@ -265,10 +262,44 @@ namespace custom_link_bridge
                     if (mode == apm_bridge::GimbalMode::MISSION)
                     {
                         relative = cfg_.constrainMissionOrientation(relative);
-                        mission_world = body * relative;
                     }
                     else if (mode == apm_bridge::GimbalMode::HORIZON)
-                        relative = limitRelative(relative);
+                        relative = cfg_.constrainMissionOrientation(relative);
+                    if (protection && mode != apm_bridge::GimbalMode::AIM)
+                    {
+                        trajectory.reset(measured_joints);
+                        relative = body.inverse() * enu;
+                    }
+                    auto target_joints = apm_bridge::gimbalJointAngles(relative, axes);
+                    for (size_t i = 0; i < target_joints.size(); ++i)
+                    {
+                        target_joints[i] *= 180 / M_PI;
+                        if (i == 2 && cfg_.yaw.min_deg == cfg_.yaw.max_deg)
+                            target_joints[i] = trajectory.positions()[i] + std::remainder(
+                                target_joints[i] - trajectory.positions()[i], 360.0);
+                    }
+                    if (dt > 0)
+                    {
+                        if (mode == apm_bridge::GimbalMode::MISSION)
+                        {
+                            auto desired_rates = target_joints;
+                            for (size_t i = 0; i < desired_rates.size(); ++i)
+                                desired_rates[i] = (target_joints[i] - trajectory.positions()[i]) / dt;
+                            // MISSION already limits LOS rates; do not low-pass vehicle stabilization twice.
+                            trajectory.reset(target_joints, desired_rates);
+                        }
+                        else
+                            trajectory.step(target_joints, dt, axes);
+                    }
+                    const xfrobot::GimbalAxisConfig limits[3] = {cfg_.roll, cfg_.pitch, cfg_.yaw};
+                    for (size_t i = 0; i < target_joints.size(); ++i)
+                    {
+                        trajectory.constrain(i, limits[i].min_deg, limits[i].max_deg);
+                        target_joints[i] = trajectory.positions()[i] * M_PI / 180;
+                    }
+                    relative = apm_bridge::gimbalCameraToWorld(tf2::Quaternion(0, 0, 0, 1), target_joints, axes);
+                    if (mode == apm_bridge::GimbalMode::MISSION)
+                        mission_world = body * relative;
                     const auto frd = enuRelativeToFrd(relative);
                     RpcPose command;
                     command.position = {mount_position->x(), mount_position->y(), mount_position->z()};

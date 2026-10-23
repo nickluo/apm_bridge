@@ -93,6 +93,66 @@ Only an explicitly disabled AirSim gimbal returns no object. Invalid backend con
 AirSim SDK is an explicit error; serial-open failures are logged without
 publishing success-shaped gimbal data.
 
+### Shared C20S / C40D / C200T pose reconstruction
+
+Serial and AirSim use `gimbalCameraToWorld` for all three models. With FRD
+encoder angles `(roll, pitch, yaw)`, the camera FLU-to-ENU orientation is
+`q_body * q_z(-yaw) * q_x(roll) * q_y(-pitch)`: complete vehicle attitude,
+followed by the yaw-roll-pitch joint chain. Positive vendor pitch is nose-up;
+positive vendor yaw is clockwise. Only the available axes differ:
+
+| Model | Roll | Pitch | Yaw |
+| --- | --- | --- | --- |
+| C20S | absent | present | absent |
+| C40D | present | present | absent |
+| C200T | present | present | present |
+
+Absent encoder slots are ignored, not interpreted as zero world rotation;
+those degrees of freedom remain coupled to the vehicle. All models assume
+aligned carrier/camera frames at encoder zero and no additional mounting
+rotation. No mounting flip is inferred from `inv_flag`; a different mounting
+requires an explicit calibrated extrinsic transform.
+
+The serial backend reorders `mtr_angle` from **pitch/roll/yaw** into the joint
+chain; it never mixes absolute `cam_angle` roll/pitch with vehicle heading.
+`cam_angle` remains available to the existing stabilization/protection control
+policies. Vehicle attitude is snapshotted with each valid encoder packet, so
+repeated publications of one timestamp have one pose. Missing, invalid or
+older-than-200-ms vehicle attitude suppresses pose publication for **all models**,
+even when `send_uav_data=false`; that switch only disables the vendor's optional
+onboard fusion input. Samples use the latest received vehicle attitude, not
+hardware-synchronized or interpolated measurements. Angular rates are reordered
+from pitch/roll/yaw and converted FRD-to-FLU as `(roll, -pitch, -yaw)` before
+filtering; absent motors do not imply zero camera gyro rates.
+
+AirSim derives virtual encoders from the body-relative camera rotation with
+axis-aware yaw-roll-pitch decomposition, then uses the same reconstruction for
+pose publication, control feedback and angular-rate estimation. Pitch crossing
++/-90 degrees is preserved. At a three-axis roll singularity, equivalent pitch
+and yaw values preserve the rotation, not unique physical encoder readings.
+Legacy Euler slots for every model are derived from the reconstructed
+heading-relative rotation; `getOrientationFLU()` returns that relative
+orientation, whereas the callback publishes the complete ENU orientation.
+
+`gimbal_interface_test` checks all three models using serial PTYs and AirSim RPC
+simulation against independent rotation-matrix ground truth: mixed vehicle and
+joint attitudes, ignored absent-axis slots, roll singularities, pitch beyond
++/-90 degrees, gyro signs, freshness and stable timestamps. Existing
+AIM/MISSION/HORIZON targets and model-specific protection policies are retained;
+AirSim HORIZON now applies the same yaw-roll-pitch joint constraints as MISSION,
+rather than projecting through a separate ZYX rotation order.
+With `APM_BRIDGE_AIRSIM=ON`, opt in to `APM_BRIDGE_AIRSIM_LIVE_TEST=ON` to register
+`gimbal_airsim_live_test`. It reads 20 poses from an already running AirSim
+instance (default `127.0.0.1:41451`, first vehicle, camera `0`, C20S), injects
+virtual encoders and vehicle attitude into a PTY serial backend, and requires
+less than 0.1-degree reconstruction error against the simulator's camera pose.
+It never sends AirSim camera, vehicle or flight-control commands. Optional
+`APM_BRIDGE_AIRSIM_HOST`, `APM_BRIDGE_AIRSIM_VEHICLE`, `APM_BRIDGE_AIRSIM_CAMERA`
+and `APM_BRIDGE_AIRSIM_MODEL` environment variables select the endpoint/model.
+The live test requires a matching aligned camera and sufficiently slow motion
+because the two RPC pose reads are not simultaneous; it is not a dynamic flight
+test.
+
 ### AIM / MISSION / HORIZON
 
 `CustomLinkVehicleNode` is the only camera controller and `/fpv/gimbal` publisher.
@@ -154,7 +214,7 @@ MISSION parameters (same YAML keys on both backends):
 | Parameter | Default | Meaning |
 | --- | --- | --- |
 | `gimbal.tracking_gain` | 2.0 | Image-angle proportional gain, 1/s |
-| `gimbal.tracking_max_rate` | 30.0 | Per-axis limit, deg/s; the single speed cap for MISSION tracking and HORIZON leveling (absorbs the former `max_angle_speed`) |
+| `gimbal.tracking_max_rate` | 30.0 | Per-axis limit, deg/s; MISSION tracking, HORIZON leveling and AIM/HORIZON angle trajectories (absorbs the former `max_angle_speed`) |
 | `gimbal.tracking_max_accel` | 90.0 | Per-axis command slew limit, deg/s² |
 | `gimbal.tracking_filter_tau` | 0.15 | First-order commanded-rate filter, seconds |
 | `gimbal.tracking_rate_feedforward` | 1.0 | Gain on ego-compensated LOS angular-rate feedforward; 0 retains angle feedback only for noisy rendered-camera tracking |
@@ -165,8 +225,44 @@ camera-frame LOS Jacobian before filtering/slew-limiting feedback and feedforwar
 together. Saturation scales the actuated rate vector uniformly to preserve its
 correction direction; absent axes cannot consume the rate budget. Spherical LOS
 derivatives are not directly assigned to gyro axes.
-Mode transitions reset its rate history. Rate/acceleration/filter parameters
-must be finite and positive; the tracking rate must not exceed 150 deg/s.
+Mode transitions reset the LOS controller's rate history. Rate/acceleration/filter
+parameters must be finite and positive; the tracking rate must not exceed 150 deg/s.
+
+### Mode-transition motion limits
+
+AIM and HORIZON are **targets**, not instantaneous camera poses. AirSim now
+integrates a shared joint-angle trajectory using `tracking_max_rate` (deg/s)
+and `tracking_max_accel` (deg/s²), with braking before reaching an angle target.
+The trajectory state/velocity is retained across simulated AIM/HORIZON changes;
+MISSION continues using the existing bounded LOS controller and world-attitude
+stabilization directly, then updates the trajectory state for the next angle
+mode. Applying a second joint servo to MISSION would delay vehicle-motion
+compensation and can lose visual lock during launch. Joint limits and roll-protection stops take priority over acceleration
+continuity. Yaw wrap is handled along the shortest path when yaw limits are
+disabled. Startup/reconnect seeds the trajectory from measured encoder angles.
+
+The serial backend ramps FPV AIM angle commands from the actual joint encoders,
+and C20S LOCK/HORIZON pitch commands from the actual absolute camera pitch;
+these are different command reference frames. It does not send the final angle
+step on mode entry. No angle trajectory advances without feedback, and stale
+feedback (200 ms) stops motion with a zero real-speed command. Existing
+MISSION rate-control and hardware protection semantics remain in effect.
+
+Previously, AirSim's `simSetCameraPose` jumped directly to AIM/HORIZON targets,
+so quaternion differentiation correctly reported thousands of deg/s for a
+one-frame 80-degree jump. A physical gimbal cannot teleport: its reported gyro
+comes directly from the protocol, not from differentiating reconstructed poses.
+However, the same abrupt angle targets could still produce a real motor jerk;
+the host-side angle ramps remove that step without assuming undocumented
+firmware servo limits. Measured/simulated gyro data is **not clipped** to hide
+motion. Rates are in the camera frame, so vehicle rotation can add to the
+motor-relative rate cap; a rate above that cap alone is not proof of a servo
+limit violation. Physical motor tracking, latency and acceleration still need
+bench verification on the actual device.
+
+Regression tests check both pose-derived angular speed and published gyro
+through repeated AIM/MISSION/HORIZON changes, bounded serial angle commands,
+settling, mechanical stops and stale-feedback behavior.
 
 **AirSim setup:** set the controlled camera's
 `"Gimbal": {"Stabilization": 0.0}` and restart the Play session. Otherwise

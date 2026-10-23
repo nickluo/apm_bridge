@@ -358,7 +358,10 @@ def run_case(model, harness):
     if model == 'C20S':
         for p in in_window(1.0, 2.0) + in_window(10.1, DURATION):
             assert p.op_type[1] == 0, f't={p.t:.2f} 常态俯仰应为角度控制: {p.op_type}'
-            assert p.op_value[1] == -500, f't={p.t:.2f} 期望角 -5deg 编码异常: {p.op_value[1]}'
+            assert -1200 <= p.op_value[1] <= -499, \
+                f't={p.t:.2f} 俯仰轨迹越过反馈/期望区间: {p.op_value[1]}'
+        for p in in_window(1.5, 2.0) + in_window(10.7, DURATION):
+            assert abs(p.op_value[1] + 500) <= 5, f't={p.t:.2f} 俯仰轨迹未收敛: {p.op_value[1]}'
         for p in in_window(9.4, 9.6):
             assert p.op_type[1] == 2, f't={p.t:.2f} 大滚转下俯仰应切速度保持: {p.op_type}'
             assert p.op_value[1] == 0, f't={p.t:.2f} 大滚转下 op_value 应为 0: {p.op_value[1]}'

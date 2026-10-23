@@ -74,7 +74,7 @@ custom_link_bridge:
       # 真机/AirSim 增稳云台正值抬头，仅 HORIZON 使用；MISSION 以画面中心为目标。
       pitch_hold: 0.0
       # AIM 相对机身俯仰期望为 90 + pitch_aim (deg)，对齐 ROS FLU +Z（向上）。
-      pitch_aim: -15.0
+      pitch_aim: -10.0
       tracking_gain: 2.0
       tracking_max_rate: 150.0 # deg/s，每轴统一角速度上限。
       tracking_max_accel: 600.0 # deg/s^2.
@@ -86,8 +86,8 @@ custom_link_bridge:
       model: "C20S"
       # roll_min: -50.0    # deg
       # roll_max: 50.0
-      # pitch_min: -135.0
-      # pitch_max: 40.0
+      pitch_min: -120.0
+      pitch_max: 120.0
       # pitch_roll_speed_scale: 12.0
       # yaw_speed_scale: 10.0
       # ---- C-20S HORIZON 单轴俯仰逻辑 ----

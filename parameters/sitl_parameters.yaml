@@ -11,7 +11,8 @@ custom_link_bridge:
       mission_on_ground: true
       model: "C20S"
       pitch_aim: -10.0 # AIM is 80 deg relative to the launcher-mounted body.
-      pitch_max: 85.0 # Virtual SITL joint only; hardware model defaults remain unchanged.
+      pitch_min: -120.0
+      pitch_max: 120.0
       pitch_hold: 0.0 # HORIZON alone: positive nose-up, degrees. MISSION centers LOS at zero.
       tracking_gain: 2.0
       tracking_max_rate: 150.0 # deg/s, per actuated axis; the single per-axis speed cap for MISSION tracking and HORIZON leveling (absorbs the former max_angle_speed).

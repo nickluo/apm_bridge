@@ -42,6 +42,8 @@ int main(int argc, char **argv)
     // 解算)、不执行事件表 (陀螺校准/命令5/6), 只运行控制律
     const bool hw_mode = std::getenv("GIMBAL_HW") != nullptr;
     cfg.send_uav_data = !hw_mode;
+    if (!hw_mode)
+        cfg.tracking.max_rate_dps = 150.0; // Match the protocol test's legacy golden model.
     if (model == GimbalModel::C20S)
         cfg.pitch_hold_deg = -5.0f; // 非零期望角: 编码验证 + 实机上角度保持可见
     if (argc >= 6) // 可选: 覆盖 C-20S 大滚转阈值

@@ -145,9 +145,9 @@ tf2::Quaternion GimbalConfig::constrainMissionOrientation(const tf2::Quaternion 
     const auto wrap = [](double angle) { return std::atan2(std::sin(angle), std::cos(angle)); };
     const auto limited = [this](double roll_angle, double pitch_angle, double yaw_angle) {
         const double deg = 180.0 / M_PI;
-        return tf2::Quaternion(tf2::Vector3(0, 0, 1), -yaw.constrainDegrees(-yaw_angle * deg) / deg) *
-            tf2::Quaternion(tf2::Vector3(1, 0, 0), roll.constrainDegrees(roll_angle * deg) / deg) *
-            tf2::Quaternion(tf2::Vector3(0, 1, 0), -pitch.constrainDegrees(-pitch_angle * deg) / deg);
+        return apm_bridge::gimbalCameraToWorld(tf2::Quaternion(0, 0, 0, 1),
+            {roll.constrainDegrees(roll_angle * deg) / deg, pitch.constrainDegrees(-pitch_angle * deg) / deg,
+             yaw.constrainDegrees(-yaw_angle * deg) / deg}, {roll.present, pitch.present, yaw.present});
     };
     const auto first = limited(r, p, y);
     const auto second = limited(r >= 0 ? M_PI - r : -M_PI - r, wrap(p + M_PI), wrap(y + M_PI));
@@ -209,7 +209,8 @@ GimbalControl::GimbalControl(const std::string &port)
 
 GimbalControl::GimbalControl(const std::string &port, const GimbalConfig &gimbal_cfg)
     : port_name(port), is_open(false), running(false), cfg(gimbal_cfg),
-      aim_target_degrees(cfg.aimTargetDegrees()), tracking_controller(cfg.tracking), cmd_trig_counter(0)
+      aim_target_degrees(cfg.aimTargetDegrees()), tracking_controller(cfg.tracking),
+      angle_trajectory(cfg.tracking), cmd_trig_counter(0)
 {
     memset(ctrl_op_type, 0, sizeof(ctrl_op_type));
     memset(ctrl_op_value, 0, sizeof(ctrl_op_value));
@@ -226,7 +227,6 @@ GimbalControl::GimbalControl(const std::string &port, const GimbalConfig &gimbal
 
     memset(&last_response, 0, sizeof(Gbc2GcuPkt_t));
     memset(&last_status, 0, sizeof(GimbalStatus));
-    memset(euler_angles_FLU, 0, sizeof(euler_angles_FLU));
     open();
 }
 
@@ -301,15 +301,9 @@ void GimbalControl::start()
         orientation_timer = node->create_wall_timer(std::chrono::milliseconds(10), [this]() {
             if (!is_running())
                 return;
-            auto msg = getOrientationFLU();
-            if (!msg)
-                return;
-            tf2::Quaternion q;
-            tf2::fromMsg(msg->orientation, q);
-            const tf2::Quaternion heading(tf2::Vector3(0, 0, 1), vehicle_heading.load());
-            msg->orientation = tf2::toMsg(heading * q);
-            msg->header.frame_id = "base_link";
-            orientation_callback(std::move(msg));
+            auto msg = makeOrientationFLU(true);
+            if (msg)
+                orientation_callback(std::move(msg));
         });
         RCLCPP_INFO(node->get_logger(),
                     "Gimbal enabled on %s (model index %d, axes R/P/Y: %d/%d/%d, uav_fusion: %s)",
@@ -327,6 +321,10 @@ void GimbalControl::updateVehicleState(const sensor_msgs::msg::Imu &imu, double 
     {
         RCLCPP_ERROR(node ? node->get_logger() : rclcpp::get_logger("xfrobot_gimbal"),
                      "Ignoring invalid vehicle orientation for gimbal");
+        {
+            std::lock_guard<std::mutex> lock(mtx);
+            vehicle_stamp = {};
+        }
         if (cfg.send_uav_data)
         {
             const int16_t invalid[3] = {};
@@ -337,7 +335,12 @@ void GimbalControl::updateVehicleState(const sensor_msgs::msg::Imu &imu, double 
     q.normalize();
     double roll, pitch, yaw;
     tf2::Matrix3x3(q).getRPY(roll, pitch, yaw);
-    vehicle_heading.store(yaw);
+    {
+        std::lock_guard<std::mutex> lock(mtx);
+        vehicle_heading = yaw;
+        vehicle_orientation = q;
+        vehicle_stamp = std::chrono::steady_clock::now();
+    }
     if (!cfg.send_uav_data)
         return;
     const auto &a = imu.linear_acceleration;
@@ -388,6 +391,7 @@ void GimbalControl::run()
 
         start_stop(true);
         control_stamp = std::chrono::steady_clock::now();
+        angle_trajectory_ready = false;
         {
             std::lock_guard<std::mutex> lock(mtx);
             last_status.rx_ok = false;
@@ -404,6 +408,13 @@ void GimbalControl::run()
                 tracking_controller.reset();
                 control_mode = requested;
                 roll_hold_active = false;
+                angle_trajectory_ready = false;
+                angle_axes = {};
+                for (size_t i = 0; i < 3; ++i)
+                {
+                    ctrl_op_type[i] = OP_TYPE_REAL_SPEED;
+                    ctrl_op_value[i] = 0;
+                }
             }
             ctrl_wk_mode = control_mode == apm_bridge::GimbalMode::AIM ? WK_MODE_FPV : WK_MODE_LOCK;
             if (control_mode == apm_bridge::GimbalMode::AIM)
@@ -529,18 +540,26 @@ void GimbalControl::run()
                         ctrl_op_value[i] = static_cast<int16_t>(speed_gbc[i] * 10.0f);
                     }
                 }
+                smoothAngleCommands(dt, true);
                 sendControlPacket();
 
                 {
                     std::lock_guard<std::mutex> lock(mtx);
                     feedback_stamp = std::chrono::steady_clock::now();
                     orientation_stamp = node ? node->now() : rclcpp::Clock().now();
-                    euler_angles_FLU[0] =   last_response.cam_angle[0] * 0.01f;
-                    euler_angles_FLU[1] = - last_response.cam_angle[1] * 0.01f;
-                    // 无偏航电机 (C-20S/C-40D) 时相机偏航随载体, 编码器不存在
-                    euler_angles_FLU[2] = cfg.yaw.present ? -last_response.mtr_angle[2] * 0.01f : 0.0f;
+                    camera_pose_valid = vehicle_stamp != std::chrono::steady_clock::time_point{} &&
+                        feedback_stamp - vehicle_stamp <= std::chrono::milliseconds(UAV_DATA_TIMEOUT_MS);
+                    if (camera_pose_valid)
+                    {
+                        const double radians = 0.01 * M_PI / 180.0;
+                        camera_orientation = apm_bridge::gimbalCameraToWorld(vehicle_orientation,
+                            {last_response.mtr_angle[1] * radians, last_response.mtr_angle[0] * radians,
+                             last_response.mtr_angle[2] * radians},
+                            {cfg.roll.present, cfg.pitch.present, cfg.yaw.present});
+                        camera_heading = vehicle_heading;
+                    }
                     ema_filter.filter( last_response.cam_rate[1] * 0.1f, 0);    // Roll rate
-                    ema_filter.filter( last_response.cam_rate[0] * 0.1f, 1);    // Pitch rate
+                    ema_filter.filter(-last_response.cam_rate[0] * 0.1f, 1);    // Pitch rate
                     ema_filter.filter(-last_response.cam_rate[2] * 0.1f, 2);    // Yaw rate
                 }
 
@@ -550,12 +569,71 @@ void GimbalControl::run()
             {
                 if (control_mode == apm_bridge::GimbalMode::MISSION)
                     updateMissionControl(dt);
-                // 无法读取到包，保持当前期望值不变 (维持通信频率)
+                // Angle trajectories must not advance without fresh encoder feedback.
+                smoothAngleCommands(dt, false);
                 sendControlPacket();
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
     });
+}
+
+void GimbalControl::smoothAngleCommands(double dt, bool fresh_feedback)
+{
+    const bool present[3] = {cfg.roll.present, cfg.pitch.present, cfg.yaw.present};
+    std::array<bool, 3> axes{};
+    std::array<double, 3> target{};
+    for (size_t i = 0; i < axes.size(); ++i)
+    {
+        axes[i] = present[i] && ctrl_op_type[i] == OP_TYPE_ANGLE;
+        target[i] = ctrl_op_value[i] * .01;
+    }
+    const int encoder[3] = {1, 0, 2};
+    auto seed = angle_trajectory.positions();
+    auto rates = angle_trajectory.rates();
+    for (size_t i = 0; i < axes.size(); ++i)
+        if (!angle_trajectory_ready || !angle_axes[i])
+        {
+            seed[i] = last_response.mtr_angle[encoder[i]] * .01;
+            // LOCK angle targets are world pitch; FPV targets are joint-relative.
+            if (control_mode == apm_bridge::GimbalMode::HORIZON && i == 1)
+                seed[i] = last_response.cam_angle[1] * .01;
+            rates[i] = 0;
+        }
+    if (fresh_feedback)
+    {
+        angle_trajectory.reset(seed, rates);
+        angle_trajectory_ready = true;
+        angle_axes = axes;
+        angle_trajectory.step(target, dt, axes);
+        const GimbalAxisConfig limits[3] = {cfg.roll, cfg.pitch, cfg.yaw};
+        for (size_t i = 0; i < axes.size(); ++i)
+            if (control_mode == apm_bridge::GimbalMode::AIM)
+                angle_trajectory.constrain(i, limits[i].min_deg, limits[i].max_deg);
+    }
+    if (!fresh_feedback && std::chrono::steady_clock::now() - feedback_stamp >
+            std::chrono::milliseconds(UAV_DATA_TIMEOUT_MS))
+    {
+        angle_trajectory_ready = false;
+        angle_axes = {};
+        for (size_t i = 0; i < axes.size(); ++i)
+        {
+            ctrl_op_type[i] = OP_TYPE_REAL_SPEED;
+            ctrl_op_value[i] = 0;
+        }
+        return;
+    }
+    for (size_t i = 0; i < axes.size(); ++i)
+        if (axes[i])
+        {
+            if (!angle_trajectory_ready || !angle_axes[i])
+            {
+                ctrl_op_type[i] = OP_TYPE_REAL_SPEED;
+                ctrl_op_value[i] = 0;
+            }
+            else
+                ctrl_op_value[i] = static_cast<int16_t>(std::lround(angle_trajectory.positions()[i] * 100));
+        }
 }
 
 void GimbalControl::setMode(apm_bridge::GimbalMode requested)
@@ -623,54 +701,38 @@ void GimbalControl::updateMissionControl(double dt)
 
 sensor_msgs::msg::Imu::UniquePtr GimbalControl::getOrientationFLU()
 {
-    // 锁内拷贝局部量, 避免锁外再读共享数组
-    float euler[3], omega[3];
+    return makeOrientationFLU(false);
+}
+
+sensor_msgs::msg::Imu::UniquePtr GimbalControl::makeOrientationFLU(bool world_frame)
+{
+    float omega[3];
+    tf2::Quaternion camera_to_world;
+    double heading_angle;
     rclcpp::Time stamp{0, 0, RCL_ROS_TIME};
     {
         std::lock_guard<std::mutex> lock(mtx);
-        if (!last_status.rx_ok || std::chrono::steady_clock::now() - feedback_stamp >
-            std::chrono::milliseconds(UAV_DATA_TIMEOUT_MS))
+        const auto now = std::chrono::steady_clock::now();
+        const auto timeout = std::chrono::milliseconds(UAV_DATA_TIMEOUT_MS);
+        if (!last_status.rx_ok || now - feedback_stamp > timeout || !camera_pose_valid ||
+            vehicle_stamp == std::chrono::steady_clock::time_point{} || now - vehicle_stamp > timeout)
             return nullptr;
-        euler[0] = euler_angles_FLU[0];
-        euler[1] = euler_angles_FLU[1];
-        euler[2] = euler_angles_FLU[2];
         omega[0] = ema_filter[0];
         omega[1] = ema_filter[1];
         omega[2] = ema_filter[2];
+        camera_to_world = camera_orientation;
+        heading_angle = camera_heading;
         stamp = orientation_stamp;
     }
 
-    // 1. 将角度从度转换为弧度 (半角)
-    float yaw_rad_half   = euler[2] * M_PIf / 180.0f * 0.5f;
-    float roll_rad_half  = euler[0] * M_PIf / 180.0f * 0.5f;
-    float pitch_rad_half = euler[1] * M_PIf / 180.0f * 0.5f;
-
-    // 2. 计算半角的 sin 和 cos
-    float cy = std::cos(yaw_rad_half);
-    float sy = std::sin(yaw_rad_half);
-    float cr = std::cos(roll_rad_half);
-    float sr = std::sin(roll_rad_half);
-    float cp = std::cos(pitch_rad_half);
-    float sp = std::sin(pitch_rad_half);
-    // 3. 根据 Z-X-Y 顺序计算四元数
-    // q = q_z * q_x * q_y
-    tf2::Quaternion q;
-    q.setW(cp * cy * cr - sp * sy * sr);
-    q.setX(cp * cy * sr - sp * sy * cr);
-    q.setY(sp * cy * cr + cp * sy * sr);
-    q.setZ(sp * cy * sr + cp * sy * cr);
-
     sensor_msgs::msg::Imu::UniquePtr imu_msg = std::make_unique<sensor_msgs::msg::Imu>();
     imu_msg->header.stamp = stamp;
-    imu_msg->header.frame_id = "gimbal_link";
-    imu_msg->orientation.x = q.x();
-    imu_msg->orientation.y = q.y();
-    imu_msg->orientation.z = q.z();
-    imu_msg->orientation.w = q.w();
-    // Use orientation_covariance to store raw FLU euler angles in RPY order for further processing
-    imu_msg->orientation_covariance[0] = euler[0] * M_PIf / 180.0f;
-    imu_msg->orientation_covariance[1] = euler[1] * M_PIf / 180.0f;
-    imu_msg->orientation_covariance[2] = euler[2] * M_PIf / 180.0f;
+    imu_msg->header.frame_id = world_frame ? "base_link" : "gimbal_link";
+    const tf2::Quaternion heading(tf2::Vector3(0, 0, 1), heading_angle);
+    const auto relative = heading.inverse() * camera_to_world;
+    tf2::Matrix3x3(relative).getRPY(imu_msg->orientation_covariance[0],
+        imu_msg->orientation_covariance[1], imu_msg->orientation_covariance[2]);
+    imu_msg->orientation = tf2::toMsg(world_frame ? camera_to_world : relative);
     imu_msg->angular_velocity.x = omega[0] * M_PIf / 180.0f; // rad/s
     imu_msg->angular_velocity.y = omega[1] * M_PIf / 180.0f;
     imu_msg->angular_velocity.z = omega[2] * M_PIf / 180.0f;

@@ -329,9 +329,11 @@ def test_actual_node_modes_and_los_subscription(tmp_path, monkeypatch):
 
             wait_for(lambda: modes and modes[-1] == "AIM" and mission_pub.get_subscription_count() > 0)
             armed = True
-            pump(.15)
+            pump(2.4)
             assert modes[-1] == "AIM"
-            assert controls[-1].wk_mode == [2, 2, 2] and controls[-1].op_value == [0, 3500, 0]
+            assert controls[-1].wk_mode == [2, 2, 2]
+            assert controls[-1].op_value[0] == controls[-1].op_value[2] == 0
+            assert abs(controls[-1].op_value[1] - 3500) <= 1
             assert "AIM requested" not in log_path.read_text()
             mission = offboard = True
             wait_for(lambda: modes[-1] == "MISSION")
@@ -356,8 +358,8 @@ def test_actual_node_modes_and_los_subscription(tmp_path, monkeypatch):
             assert abs(controls[-1].op_value[1]) <= 1
             offboard = False
             wait_for(lambda: modes[-1] == "HORIZON")
-            pump(.1)
-            assert controls[-1].op_type[1] == 0 and controls[-1].op_value[1] == 1200
+            pump(2.0)
+            assert controls[-1].op_type[1] == 0 and abs(controls[-1].op_value[1] - 1200) <= 1
             offboard = True
             pump(.15)
             assert modes[-1] == "HORIZON", "stale mission resumed after manual takeover"

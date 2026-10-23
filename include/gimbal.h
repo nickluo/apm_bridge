@@ -16,6 +16,7 @@
 #include "serial/serial.h"
 #include "ema_filter.h"
 #include "gimbal_interface.h"
+#include "gimbal_kinematics.h"
 
 
 namespace xfrobot
@@ -149,8 +150,8 @@ struct GimbalConfig
     // 控制增益 (沿用原硬编码的现场调参数值, 仅 C-40D/C-200T 使用)
     float pitch_roll_speed_scale = 12.0f; // 俯仰/滚转速度控制比例系数
     float yaw_speed_scale = 10.0f;        // 偏航速度控制比例系数
-    // tracking.max_rate_dps 是唯一的每轴角速度上限 (deg/s): MISSION 跟踪控制器、
-    // HORIZON 回平 P 控制与限位蠕行共用 (合并了原 max_angle_speed 参数)。
+    // tracking.max_rate_dps 是统一每轴命令速度上限 (deg/s): MISSION 跟踪、
+    // HORIZON 回平及 AIM/HORIZON 角度轨迹共用 (合并了原 max_angle_speed 参数)。
     apm_bridge::GimbalTrackingConfig tracking;
 
     // AIM: camera +X aims toward body FLU +Z, with a nose-up pitch offset.
@@ -237,6 +238,7 @@ public:
 
     bool is_running() const;
 
+    // Heading-relative camera FLU orientation; requires fresh vehicle attitude.
     sensor_msgs::msg::Imu::UniquePtr getOrientationFLU();
 
     // -------------------- 状态 --------------------
@@ -294,7 +296,12 @@ private:
     rclcpp::Node *node = nullptr;
     Callback orientation_callback;
     rclcpp::TimerBase::SharedPtr orientation_timer;
-    std::atomic<double> vehicle_heading{0.0};
+    double vehicle_heading = 0.0;
+    tf2::Quaternion vehicle_orientation{0, 0, 0, 1};
+    std::chrono::steady_clock::time_point vehicle_stamp{};
+    tf2::Quaternion camera_orientation{0, 0, 0, 1};
+    double camera_heading = 0.0;
+    bool camera_pose_valid = false;
     std::string port_name;
     serial::Serial serial_port;
     bool is_open;
@@ -302,6 +309,9 @@ private:
     GimbalConfig cfg;
     std::array<double, 3> aim_target_degrees;
     apm_bridge::GimbalTrackingController tracking_controller;
+    apm_bridge::GimbalAngleTrajectory angle_trajectory;
+    bool angle_trajectory_ready = false;
+    std::array<bool, 3> angle_axes{};
     std::atomic<apm_bridge::GimbalMode> mode{apm_bridge::GimbalMode::HORIZON};
     apm_bridge::GimbalMode control_mode = apm_bridge::GimbalMode::HORIZON;
     std::chrono::steady_clock::time_point control_stamp{};
@@ -341,7 +351,6 @@ private:
     Gbc2GcuPkt_t last_response;
 
     std::mutex mtx;
-    float euler_angles_FLU[3]; // 0-滚转, 1-俯仰, 2-偏航
     GimbalStatus last_status;
 
     std::thread work_thread;
@@ -365,6 +374,8 @@ private:
      */
     void sendControlPacket();
     void updateMissionControl(double dt);
+    void smoothAngleCommands(double dt, bool fresh_feedback);
+    sensor_msgs::msg::Imu::UniquePtr makeOrientationFLU(bool world_frame);
 
     /**
      * @brief 尝试读取并解析一个云台返回包
