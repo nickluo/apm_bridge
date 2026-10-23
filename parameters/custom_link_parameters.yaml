@@ -1,6 +1,6 @@
 custom_link_bridge:
   ros__parameters:
-    gravity_const: 9.801
+    gravity_const: 9.8065
     mass: 1.067
 
     lipo_cells: 6
@@ -22,7 +22,7 @@ custom_link_bridge:
       D:  0.0119440187
       n:  1
       # 推力指令上限; 兼作 thrustToForce 反演曲线的拟合域上界 [0, thrust_limit]
-      thrust_limit: 0.6
+      thrust_limit: 0.9
       spin_k: 0.0
       vbat_a: -0.0776732
       vbat_b:  2.7346374
@@ -57,7 +57,7 @@ custom_link_bridge:
       # 接收机进入配对模式。FC 成功应答 "binding..." 并记 INFO 日志；
       # 被拒/失败记 WARN。换新遥控器/接收机配对时临时打开，平时保持
       # false 以免每次上电都打断正常接收。
-      bind_rx_on_connect: false
+      bind_rx_on_connect: true
 
     landed:
       airborne_altitude: 0.5
@@ -69,15 +69,14 @@ custom_link_bridge:
     gimbal_port: "/dev/ttyS10"
 
     gimbal:
-      mission_on_ground: true
+      mission_on_ground: true # 在地面时是否允许执行任务
       # 共用俯仰角 (deg)：捷联仍为机身固定角 (FLU 正值低头)。
       # 真机/AirSim 增稳云台正值抬头，仅 HORIZON 使用；MISSION 以画面中心为目标。
       pitch_hold: 0.0
       # AIM 相对机身俯仰期望为 90 + pitch_aim (deg)，对齐 ROS FLU +Z（向上）。
-      # 默认 +40 deg 上限会截断 +90 deg 期望；请按真实机械行程配置，不能盲目放大限位。
       pitch_aim: -15.0
       tracking_gain: 2.0
-      tracking_max_rate: 150.0 # deg/s，每轴统一角速度上限（MISSION 跟踪与 HORIZON 回平共用，原 max_angle_speed 已并入）。
+      tracking_max_rate: 150.0 # deg/s，每轴统一角速度上限。
       tracking_max_accel: 600.0 # deg/s^2.
       tracking_filter_tau: 0.12 # seconds.
       los_timeout: 0.5 # seconds.
@@ -91,7 +90,6 @@ custom_link_bridge:
       # pitch_max: 40.0
       # pitch_roll_speed_scale: 12.0
       # yaw_speed_scale: 10.0
-      # (max_angle_speed 已删除: 每轴角速度上限统一由 tracking_max_rate 控制)
       # ---- C-20S HORIZON 单轴俯仰逻辑 ----
       # 锁定+角度控制保持期望俯仰角 (0=水平);
       # |IMU滚转角| > roll_hold_enter (大坡度/倒飞): 锁定+零速保持当前俯仰角,
