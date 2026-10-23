@@ -276,9 +276,17 @@ For an opt-in captive three-axis rig experiment controlled by the zero-based
 `tuning_channel` parameter (default 8 = CH9), see
 [bench PID tuning](parameters/bench_pid_README.md) and
 [the disabled-by-default parameters](parameters/bench_pid.yaml).
-It never arms or saves the FC. Runtime PID application requires the matching
-firmware/service extension; ordinary CLI SET readback alone is not proof that
-the running PID coefficients changed.
+It never arms or saves the FC. ACRO start uses a bounded quaternion hold of the
+captured starting orientation between rate-only trials. ANGLE start selects native
+FC ANGLE closed-loop angle-step trials (yaw remains a rate test), with the existing
+outer-loop settings fixed and recorded; it requires new firmware capability
+`CMD_APPLY_PID args="angle" -> ANGLE OFFBOARD 1`. The raw ATTITUDE path encodes
+roll/pitch targets in degrees and yaw in deg/s using `mode_req=3`; normal raw
+BODY_RATES remains `mode_req=2`. Mode feedback distinguishes `OFFBOARD|ANGLE`.
+Actual PID application still uses a short, guarded zero-output window. It cannot
+support an unbalanced rig after power loss or stopping. Runtime PID application
+requires the matching firmware/service extension; ordinary CLI SET readback alone
+is not proof that the running PID coefficients changed.
 
 The existing `/fpv/control_command`, `/fpv/control_command_raw`, `/fpv/arm`,
 `/fpv/low_level_feedback` and MAVROS-compatible telemetry interfaces are reused.

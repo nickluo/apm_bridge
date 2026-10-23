@@ -869,7 +869,7 @@ void CustomLinkVehicleNode::publishState(uint32_t mode_flags, bool is_armed)
     state.manual_input = !offboard;
 
     if (offboard) {
-        state.mode = "OFFBOARD";
+        state.mode = (mode_flags & mode::ANGLE) ? "OFFBOARD|ANGLE" : "OFFBOARD";
     }
     else {
         bool plus = false;
@@ -914,6 +914,7 @@ void CustomLinkVehicleNode::pushControl()
                 input.rate_dps[1] = cmd_bodyrates[1] * kRadToDeg;
                 input.rate_dps[2] = cmd_bodyrates[2] * kRadToDeg;
                 input.throttle = cmd_thrust;
+                input.angle = cmd_angle;
                 fresh = true;
             }
             else
@@ -935,7 +936,8 @@ void CustomLinkVehicleNode::pushControl()
     {
         for (int i = 0; i < 3; i++)
         {
-            input.rate_dps[i] = std::clamp(input.rate_dps[i], -rate_limit_dps, rate_limit_dps);
+            if (!input.angle || i == 2)
+                input.rate_dps[i] = std::clamp(input.rate_dps[i], -rate_limit_dps, rate_limit_dps);
         }
     }
     client->setControl(input, fresh);
@@ -1002,6 +1004,7 @@ void CustomLinkVehicleNode::ctrlCommandCallback(const quadrotor_msgs::msg::Contr
     }
 
     std::lock_guard<std::mutex> lk(mtx_cmd);
+    cmd_angle = false;
     cmd_bodyrates = {command->bodyrates.x, command->bodyrates.y, command->bodyrates.z};
     cmd_thrust = std::clamp(thrust, 0.0, 1.0);
     cmd_stamp = this->now();
@@ -1013,10 +1016,27 @@ void CustomLinkVehicleNode::ctrlCommandRawCallback(const quadrotor_msgs::msg::Co
     if (command->armed == 0 || !armed.load())
         return;
 
-    use_rate.store(command->control_mode == quadrotor_msgs::msg::ControlCommand::BODY_RATES);
+    const bool angle = command->control_mode == quadrotor_msgs::msg::ControlCommand::ATTITUDE;
+    std::array<double, 3> setpoints{command->bodyrates.x, command->bodyrates.y, command->bodyrates.z};
+    if (angle)
+    {
+        const auto &q = command->orientation;
+        const double norm = q.x*q.x + q.y*q.y + q.z*q.z + q.w*q.w;
+        if (!std::isfinite(norm) || std::abs(norm - 1.0) > 0.01)
+            return;
+        double roll, pitch, yaw;
+        tf2::Matrix3x3(tf2::Quaternion(q.x, q.y, q.z, q.w)).getRPY(roll, pitch, yaw);
+        setpoints = {std::clamp(roll, -10.0*kDegToRad, 10.0*kDegToRad),
+                     std::clamp(pitch, -10.0*kDegToRad, 10.0*kDegToRad), command->bodyrates.z};
+    }
+    if (!std::isfinite(command->collective_thrust) || !std::all_of(setpoints.begin(), setpoints.end(),
+        [](double value) { return std::isfinite(value); }))
+        return;
+    use_rate.store(!angle);
 
     std::lock_guard<std::mutex> lk(mtx_cmd);
-    cmd_bodyrates = {command->bodyrates.x, command->bodyrates.y, command->bodyrates.z};
+    cmd_angle = angle;
+    cmd_bodyrates = setpoints;
     cmd_thrust = std::clamp(command->collective_thrust, 0.0, 1.0);
     cmd_stamp = this->now();
     cmd_valid = true;

@@ -563,6 +563,8 @@ namespace custom_link
                         valid = cmd_valid_;
                         if (mode_request_)
                             input.mode_req = *mode_request_;
+                        if (input.mode_req == 2 && input.angle)
+                            input.mode_req = 3;
                         mode_revision = mode_request_revision_;
                         mode_pending = mode_revision != mode_request_sent_revision_;
                         if (mode_pending && rearm_pending_)

@@ -13,7 +13,9 @@ import time
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-from bench_pid_core import AXES, Gains, Limits, TuningSession, candidates, measure, setting_value
+from bench_pid_core import (AXES, Gains, HoldLimits, Limits, TuningSession, attitude_error,
+                            holding_rates, candidates, measure, setting_value)
+from sitl_support import multiply
 from bench_pid_tuner import BenchPidTuner
 import bench_pid_core
 
@@ -52,6 +54,276 @@ def test_launch_interlocks_override_yaml_as_booleans(tmp_path, overrides, expect
     assert all(type(value) is bool for value in evaluated[1].values())
 
 
+def rotation(vector):
+    length = math.sqrt(sum(v * v for v in vector))
+    if length < 1e-12:
+        return (0., 0., 0., 1.)
+    scale = math.sin(length / 2) / length
+    return tuple(v * scale for v in vector) + (math.cos(length / 2),)
+
+
+@pytest.mark.parametrize("reference", [(0., 0., 0., 1.), rotation((1.4, -.9, 2.)),
+                                        rotation((0., math.pi / 2, 0.)), rotation((math.pi, 0., 0.))])
+def test_quaternion_hold_uses_local_shortest_error_at_any_initial_attitude(reference):
+    current = multiply(reference, rotation((math.radians(5), 0., 0.)))
+    assert attitude_error(reference, current) == pytest.approx((-math.radians(5), 0, 0), abs=1e-8)
+    assert holding_rates(reference, current, HoldLimits()) == pytest.approx((-10, 0, 0), abs=1e-7)
+    assert attitude_error(reference, tuple(-v for v in current)) == pytest.approx(attitude_error(reference, current))
+    assert holding_rates(reference, current, HoldLimits(), "roll") == pytest.approx((0, 0, 0), abs=1e-7)
+
+
+@pytest.mark.parametrize("field,value", [("hold_gain", 0), ("hold_rate_dps", 100),
+                                         ("apply_window_s", 4), ("settle_rate_dps", 5),
+                                         ("settle_timeout_s", math.nan)])
+def test_unsafe_hold_configuration_rejected(field, value):
+    with pytest.raises(ValueError):
+        replace(HoldLimits(), **{field: value}).validate()
+
+
+def free_rig(node, monkeypatch, bias=(2., -1., .5)):
+    reference = rotation((.8, 1.4, -.6))
+    node.reference = reference
+    node.imu.orientation = SimpleNamespace(x=reference[0], y=reference[1], z=reference[2], w=reference[3])
+    clock = {"time": 0., "rates": [0., 0., 0.], "q": reference, "powered": [], "zero": []}
+    node.imu_stamp = 0.
+    node.check = Mock()
+    def step(dt):
+        node.refresh_command()
+        throttle, commanded = node.command
+        clock["powered" if throttle else "zero"].append(dt)
+        if throttle:
+            clock["rates"] = [r + (1 - math.exp(-dt / .015)) * (u - r)
+                               for r, u in zip(clock["rates"], commanded)]
+        else:
+            clock["rates"] = [r + math.radians(a) * dt for r, a in zip(clock["rates"], bias)]
+        clock["q"] = multiply(clock["q"], rotation(tuple(v * dt for v in clock["rates"])))
+        q = clock["q"]
+        node.imu.orientation = SimpleNamespace(x=q[0], y=q[1], z=q[2], w=q[3])
+        node.imu.angular_velocity = SimpleNamespace(**dict(zip(("x", "y", "z"), clock["rates"])))
+        clock["time"] += dt
+        node.imu_stamp = clock["time"]
+    monkeypatch.setattr("bench_pid_tuner.time.monotonic", lambda: clock["time"])
+    monkeypatch.setattr("bench_pid_tuner.time.sleep", step)
+    return clock, step
+
+
+def test_drifting_free_rig_recovers_under_power_and_excludes_excited_axis_from_hold(monkeypatch):
+    node = minimal_node()
+    clock, step = free_rig(node, monkeypatch)
+    node.command_mode = "zero"
+    for _ in range(200):
+        step(.01)
+    drift = math.degrees(math.sqrt(sum(v * v for v in attitude_error(node.reference, clock["q"]))))
+    assert drift > 4  # The previous unpowered idle cannot hold this rig.
+    node.idle()
+    assert node.command[0] == node.limits.throttle and node.command_mode == "hold"
+    assert math.degrees(math.sqrt(sum(v * v for v in attitude_error(node.reference, clock["q"])))) < 2
+    samples = node.drive(.3, node.limits.throttle, "roll", 5.)
+    assert samples and node.command[1][0] == pytest.approx(math.radians(5))
+    assert node.command[0] == node.limits.throttle  # No zero dip between drive stages.
+    node.drive(.8, node.limits.throttle, "roll", 0.)
+    assert node.command[1][0] == 0.
+    node.idle()
+    assert node.command_mode == "hold"
+
+
+def test_angle_step_metric_accepts_tracking_but_rejects_no_response_and_oscillation():
+    trace = []
+    actual = 0.
+    for index in range(600):
+        target = 2. if index < 150 else -2. if 300 <= index < 450 else 0.
+        rate = 5 * (target - actual)
+        actual += rate * .01
+        trace.append((index*.01, target, actual, 0., abs(rate)))
+    assert bench_pid_core.measure_angle(trace, 2.) < .4
+    for bad in ([tuple([s[0], s[1], 0., 0., 0.]) for s in trace],
+                [tuple([s[0], s[1], s[2]*2., 0., s[4]]) for s in trace],
+                [tuple([s[0], s[1], s[2], 2., s[4]]) for s in trace]):
+        with pytest.raises(RuntimeError):
+            bench_pid_core.measure_angle(bad, 2.)
+
+
+@pytest.mark.parametrize("axis", ["roll", "pitch"])
+def test_angle_trial_scores_attitude_not_rate_and_keeps_other_axis_level(axis):
+    node = minimal_node()
+    node.start_mode = "ANGLE"
+    node.idle = Mock()
+    node.write_report = Mock()
+    node.report = {"measurements": []}
+    def drive(duration, throttle, selected, reference):
+        assert selected == axis
+        n = round(duration / .01)
+        start = drive.time
+        drive.time += duration
+        return [(start + i*.01, reference, reference, 0., 0.) for i in range(n)]
+    drive.time = 0.
+    node.drive = drive
+    assert node.trial(axis) == 0.
+    assert len(node.report["measurements"][0]["samples"][0]) == 5
+
+
+def test_angle_yaw_is_rate_test_while_roll_pitch_stay_at_level_targets(monkeypatch):
+    node = minimal_node()
+    node.start_mode = "ANGLE"
+    node.angle_reference = (0., 0., 0., 1.)
+    node.reference = node.angle_reference
+    node.imu.orientation = SimpleNamespace(x=0., y=0., z=0., w=1.)
+    node.command_mode = "excite"
+    node.excitation_axis, node.excitation_rate = "yaw", 5.
+    node.refresh_command()
+    assert node.command == (.12, (0., 0., math.radians(5)))
+    node.check = Mock()
+    node.idle = Mock()
+    node.write_report = Mock()
+    node.report = {"measurements": []}
+    traces = samples()
+    node.drive = Mock(side_effect=[traces[:30], traces[30:110], traces[110:140], traces[140:]])
+    assert node.trial("yaw") == 0.
+    assert node.drive.call_args_list[0].args == (.3, .12, "yaw", 5.)
+
+
+def test_preflight_cannot_silently_change_selected_mode():
+    node = minimal_node()
+    node.start_mode = "ANGLE"
+    node.state.mode = "ACRO"
+    with patch("bench_pid_tuner.time.monotonic", return_value=100), pytest.raises(RuntimeError, match="startup mode changed"):
+        node.health(False)
+
+
+def test_selected_angle_mode_loss_cannot_fall_back_to_acro_offboard():
+    node = minimal_node()
+    node.start_mode = "ANGLE"
+    node.state.mode = "OFFBOARD"
+    with patch("bench_pid_tuner.time.monotonic", return_value=100), pytest.raises(RuntimeError, match="mode lost"):
+        node.health(True)
+    node.state.mode = "OFFBOARD|ANGLE"
+    with patch("bench_pid_tuner.time.monotonic", return_value=100):
+        node.health(True)
+
+
+def test_rate_trial_retains_valid_score_without_measured_axis_recentering(monkeypatch):
+    node = minimal_node()
+    clock, step = free_rig(node, monkeypatch)
+    node.report = {"measurements": []}
+    node.write_report = Mock()
+    score = node.trial("roll")
+    assert score < .3 and len(node.report["measurements"]) == 1
+    assert not clock["zero"]
+    assert node.command[0] == .12
+    assert node.command[1][0] == 0
+
+
+@pytest.mark.parametrize("bad", [(0., 0., 0., 0.), (math.nan, 0., 0., 1.), (1., 0., 0., 1.)])
+def test_invalid_quaternion_cannot_generate_hold_commands(bad):
+    with pytest.raises(ValueError):
+        holding_rates((0., 0., 0., 1.), bad, HoldLimits())
+
+
+def test_uncontrollable_hold_times_out_instead_of_raising_throttle(monkeypatch):
+    node = minimal_node()
+    clock, step = free_rig(node, monkeypatch)
+    q = multiply(node.reference, rotation((math.radians(5), 0., 0.)))
+    node.imu.orientation = SimpleNamespace(x=q[0], y=q[1], z=q[2], w=q[3])
+    monkeypatch.setattr("bench_pid_tuner.time.sleep", lambda dt: clock.update(time=clock["time"] + dt))
+    with pytest.raises(RuntimeError, match="did not settle"):
+        node.idle()
+    assert node.command[0] == .12
+
+
+def test_live_apply_uses_short_zero_window_then_returns_to_powered_hold(monkeypatch):
+    node = minimal_node()
+    node.recovering = False
+    clock, step = free_rig(node, monkeypatch)
+    node.command_mode = "hold"
+    observed = []
+    def request(cmd, args):
+        observed.append((cmd, args, node.command, node.apply_deadline))
+        step(.02)
+        return "PID PROFILE 0"
+    node.cli_request = request
+    assert node.cli(5, "0") == "PID PROFILE 0"
+    assert observed[0][2] == (0., (0., 0., 0.))
+    assert observed[0][3] is not None and clock["time"] < node.hold.apply_window_s
+    assert node.command[0] == .12 and node.command_mode == "hold" and node.apply_deadline is None
+
+
+def test_apply_window_expiry_cancels_output_without_retaking_authority(monkeypatch):
+    node = minimal_node()
+    node.recovering = False
+    clock, step = free_rig(node, monkeypatch)
+    node.command_mode = "hold"
+    def check():
+        if node.apply_deadline is not None and clock["time"] >= node.apply_deadline:
+            raise RuntimeError("application window expired")
+    node.check.side_effect = check
+    def late(cmd, args):
+        step(.3)
+        return "PID PROFILE 0"
+    node.cli_request = late
+    with pytest.raises(RuntimeError, match="window expired"):
+        node.cli(5, "0")
+    assert node.command == (0., (0., 0., 0.)) and not node.active and node.cancel.is_set()
+    assert node.mode_pub.publish.call_args.args[0].data is False
+
+
+def test_lost_apply_ack_expires_short_window_without_retry_or_power_resume(monkeypatch):
+    node = minimal_node()
+    node.recovering = False
+    node.abort_reason = None
+    clock, step = free_rig(node, monkeypatch)
+    pending = Future()
+    node.cli_client = Mock()
+    node.cli_client.call_async.return_value = pending
+    def check():
+        if node.apply_deadline is not None and clock["time"] >= node.apply_deadline:
+            raise RuntimeError("zero-output PID application window expired")
+    node.check.side_effect = check
+    with pytest.raises(RuntimeError, match="window expired"):
+        node.cli(5, "0")
+    assert node.cli_client.call_async.call_count == 1
+    node.cli_client.remove_pending_request.assert_called_once_with(pending)
+    assert clock["time"] < node.hold.apply_window_s + .02
+    assert node.command == (0., (0., 0., 0.)) and node.cancel.is_set() and not node.active
+
+
+def test_cancel_during_apply_never_restores_powered_hold(monkeypatch):
+    node = minimal_node()
+    node.recovering = False
+    clock, step = free_rig(node, monkeypatch)
+    def check():
+        if node.cancel.is_set():
+            raise RuntimeError("CH9 cancelled")
+    node.check.side_effect = check
+    def cancelled(cmd, args):
+        node.stop_output("CH9 cancelled")
+        return "PID PROFILE 0"
+    node.cli_request = cancelled
+    with pytest.raises(RuntimeError, match="cancelled"):
+        node.cli(5, "0")
+    assert node.command_mode == "zero" and not node.active
+    assert node.command == (0., (0., 0., 0.))
+
+
+def test_geodesic_excursion_guard_rejects_combined_rotation_at_tilted_reference():
+    node = minimal_node()
+    node.reference = rotation((0., math.pi / 2, 0.))
+    q = multiply(node.reference, rotation((math.radians(12), math.radians(12), 0.)))
+    node.imu.orientation = SimpleNamespace(x=q[0], y=q[1], z=q[2], w=q[3])
+    with patch("bench_pid_tuner.time.monotonic", return_value=100), pytest.raises(RuntimeError, match="excursion"):
+        node.health(True)
+
+
+def test_live_apply_rejects_drifting_gyro_before_firmware_call(monkeypatch):
+    node = minimal_node()
+    node.recovering = False
+    clock, step = free_rig(node, monkeypatch, bias=(120., 0., 0.))
+    node.cli_request = Mock()
+    with pytest.raises(RuntimeError, match="rig moving"):
+        node.cli(5, "0")
+    node.cli_request.assert_not_called()
+    assert not node.active and node.cancel.is_set()
+
+
 def test_cli_export_contains_exact_profile_and_all_selected_gains_without_save():
     text = bench_pid_core.render_cli("2", CLI_GAINS)
     commands = [line for line in text.splitlines() if line and not line.startswith("#")]
@@ -79,12 +351,17 @@ class FakeCli:
         self.values = {f"{term}_{axis}": str(value) for axis in AXES
                        for term, value in zip("pid", (40, 60, 20))}
         self.values["simplified_pids_mode"] = "OFF"
+        self.values.update(acc_trim_roll="0", acc_trim_pitch="0", angle_p_gain="50",
+                           angle_feedforward="50", angle_feedforward_smoothing_ms="80",
+                           angle_limit="60", angle_earth_ref="100", level_race_mode="OFF")
         self.calls = []
         self.profile = "0"
 
     def __call__(self, cmd, args):
         self.calls.append((cmd, args))
         if cmd == 5:
+            if args == "angle":
+                return "ANGLE OFFBOARD 1"
             if args not in ("check", self.profile):
                 raise RuntimeError("PID PROFILE MISMATCH")
             return f"PID PROFILE {self.profile}"
@@ -235,6 +512,16 @@ def minimal_node():
     node.state = SimpleNamespace(connected=True, armed=True, mode="OFFBOARD")
     node.imu = SimpleNamespace(angular_velocity=SimpleNamespace(x=0., y=0., z=0.))
     node.reference = None
+    node.command_mode = "zero"
+    node.excitation_axis = None
+    node.excitation_rate = 0.0
+    node.apply_deadline = None
+    node.hold = HoldLimits()
+    node.angle = bench_pid_core.AngleLimits()
+    node.start_mode = "ACRO"
+    node.angle_reference = None
+    node.angle_center = (0., 0.)
+    node.angle_trim = (0., 0.)
     node.mission = node.failsafe = False
     node.limits = Limits()
     node.publish_command = Mock()
@@ -338,7 +625,7 @@ def test_success_exports_cli_and_json_then_releases_without_disarming(tmp_path):
     node = export_node(tmp_path)
     node.complete_session(CLI_GAINS)
     cli_path = tmp_path / "bench-123.cli"
-    assert cli_path.read_text() == bench_pid_core.render_cli("2", CLI_GAINS)
+    assert cli_path.read_text() == "# Tuning start mode: ACRO; body-rate response.\n" + bench_pid_core.render_cli("2", CLI_GAINS)
     report = json.loads(node.report_path.read_text())
     assert report["cli_file"] == str(cli_path)
     assert report["selected"]["yaw"] == {"p": 30, "i": 0, "d": 0}
@@ -491,7 +778,7 @@ def test_health_faults_prevent_any_experiment(fault):
 
 
 @pytest.mark.parametrize("scenario", ["complete", "export-failure", "cancel", "custom-channel",
-                                      "custom-cancel", "disabled"])
+                                      "custom-cancel", "disabled", "angle", "angle-cancel", "angle-unsupported", "angle-too-tilted"])
 def test_ros_node_session_and_cancel_recovery_without_hardware(tmp_path, monkeypatch, scenario):
     import os
     import rclpy
@@ -525,7 +812,12 @@ def test_ros_node_session_and_cancel_recovery_without_hardware(tmp_path, monkeyp
     read_timeout_injected = False
     if scenario == "export-failure":
         monkeypatch.setattr("bench_pid_tuner.render_cli", Mock(side_effect=OSError("export disk full")))
-    current = {"armed": True, "mode": "ACRO", "rate": 0.0, "command": None, "switch": 1000}
+    angle_mode = scenario.startswith("angle")
+    reference = rotation((0., 0., 1.8)) if angle_mode else rotation((1.2, -.7, 1.8))
+    if scenario == "angle-too-tilted":
+        reference = rotation((math.radians(20), 0., 0.))
+    current = {"armed": True, "mode": "ANGLE" if angle_mode else "ACRO", "rates": [0., 0., 0.], "q": reference,
+               "command": None, "switch": 1000, "apply_checks": 0, "powered_sets": 0}
     outputs = []
     rc_pub = fc.create_publisher(RCIn, "/mavros/rc/in", qos_profile_sensor_data)
     imu_pub = fc.create_publisher(Imu, "/mavros/imu/data", qos_profile_sensor_data)
@@ -537,13 +829,28 @@ def test_ros_node_session_and_cancel_recovery_without_hardware(tmp_path, monkeyp
         outputs.append((time.monotonic(), msg.collective_thrust))
 
     def mode(msg):
-        current["mode"] = "OFFBOARD" if msg.data else "ACRO"
+        current["mode"] = ("OFFBOARD|ANGLE" if angle_mode else "OFFBOARD") if msg.data else ("ANGLE" if angle_mode else "ACRO")
 
     fc.create_subscription(ControlCommand, "/fpv/control_command_raw", command, qos_profile_sensor_data)
     fc.create_subscription(Bool, "/fpv/offboard", mode, 10)
 
     def cli(request, response):
         nonlocal read_timeout_injected
+        command = current["command"]
+        if scenario == "angle-unsupported" and request.cmd == 5 and request.args == "angle":
+            response.ok, response.status, response.text = True, 1, "PID PROFILE MISMATCH"
+            return response
+        if current["armed"] and request.cmd == 5 and request.args not in ("check", "angle"):
+            assert command is not None and command.collective_thrust == 0
+            assert max(abs(v) for v in (command.bodyrates.x, command.bodyrates.y, command.bodyrates.z)) < 1e-8
+            if angle_mode:
+                assert (command.orientation.x, command.orientation.y, command.orientation.z,
+                        command.orientation.w) == (0., 0., 0., 1.)
+            assert max(abs(math.degrees(v)) for v in current["rates"]) < 5
+            current["apply_checks"] += 1
+        if current["armed"] and request.cmd == 1:
+            assert command is not None and command.collective_thrust == node.limits.throttle
+            current["powered_sets"] += 1
         if scenario == "custom-channel" and request.cmd == 0 and not read_timeout_injected:
             read_timeout_injected = True
             response.ok, response.error = False, "timeout"
@@ -559,9 +866,25 @@ def test_ros_node_session_and_cancel_recovery_without_hardware(tmp_path, monkeyp
         now = time.monotonic()
         dt, last = now - last, now
         cmd = current["command"]
-        goal = cmd.bodyrates.x if cmd is not None and cmd.collective_thrust > 0 \
-            and current["mode"] == "OFFBOARD" else 0
-        current["rate"] += (1 - math.exp(-dt / .015)) * (goal - current["rate"])
+        powered = cmd is not None and cmd.collective_thrust > 0 and current["mode"].startswith("OFFBOARD")
+        if powered:
+            goals = (cmd.bodyrates.x, cmd.bodyrates.y, cmd.bodyrates.z)
+            if angle_mode:
+                assert cmd.control_mode == ControlCommand.ATTITUDE
+                target = (cmd.orientation.x, cmd.orientation.y, cmd.orientation.z, cmd.orientation.w)
+                from sitl_support import euler
+                roll, pitch, _ = euler(target)
+                measured_roll, measured_pitch, _ = euler(current["q"])
+                goals = ((roll-measured_roll)*5, (pitch-measured_pitch)*5, cmd.bodyrates.z)
+            else:
+                assert cmd.control_mode == ControlCommand.BODY_RATES
+            current["rates"] = [v + (1 - math.exp(-dt / .015)) * (u - v)
+                                for v, u in zip(current["rates"], goals)]
+        else:
+            # A free unpowered rig accelerates under an off-centre load.
+            current["rates"] = [v + math.radians(a) * dt for v, a in
+                                zip(current["rates"], (.5, -.3, .2))]
+        current["q"] = multiply(current["q"], rotation(tuple(v * dt for v in current["rates"])))
         channels = [2000] * 16
         channels[tuning_channel] = current["switch"]
         rc_pub.publish(RCIn(channels=channels))
@@ -569,8 +892,8 @@ def test_ros_node_session_and_cancel_recovery_without_hardware(tmp_path, monkeyp
         failsafe_pub.publish(Bool(data=False))
         imu = Imu()
         imu.header.stamp = fc.get_clock().now().to_msg()
-        imu.orientation.w = 1.0
-        imu.angular_velocity.x = current["rate"]
+        imu.orientation.x, imu.orientation.y, imu.orientation.z, imu.orientation.w = current["q"]
+        imu.angular_velocity.x, imu.angular_velocity.y, imu.angular_velocity.z = current["rates"]
         imu_pub.publish(imu)
 
     fc.create_timer(.005, telemetry)
@@ -592,18 +915,26 @@ def test_ros_node_session_and_cancel_recovery_without_hardware(tmp_path, monkeyp
             assert node.worker is None and not outputs and not io.calls
             assert not list(tmp_path.glob("*.cli"))
             return
-        if scenario in ("cancel", "custom-cancel"):
+        if scenario in ("angle-unsupported", "angle-too-tilted"):
+            pump(lambda: node.worker is not None and not node.worker.is_alive(), 5)
+            assert not outputs and not any(cmd == 1 for cmd, _ in io.calls)
+            if scenario == "angle-too-tilted":
+                assert "5 degrees" in node.abort_reason
+            else:
+                assert node.report["status"] == "aborted"
+            return
+        if scenario in ("cancel", "custom-cancel", "angle-cancel"):
             pump(lambda: any(cmd == 1 for cmd, _ in io.calls), 10)
             current["switch"] = 1000
             pump(lambda: node.cancel.is_set() and not node.active, 1)
-            pump(lambda: current["mode"] == "ACRO", 1)
+            pump(lambda: current["mode"] == ("ANGLE" if angle_mode else "ACRO"), 1)
             assert node.session.dirty
             current["armed"] = False
             pump(lambda: not node.session.dirty, 10)
             assert io.values["p_roll"] == "40"
             assert node.report["status"] == "aborted-restored"
         else:
-            pump(lambda: node.worker is not None and not node.worker.is_alive(), 60)
+            pump(lambda: node.worker is not None and not node.worker.is_alive(), 100)
             if scenario == "export-failure":
                 assert node.report["status"] == "aborted", node.report
                 assert node.report["rollback_required"] and node.session.dirty
@@ -616,11 +947,15 @@ def test_ros_node_session_and_cancel_recovery_without_hardware(tmp_path, monkeyp
                 cli_path = node.report_path.with_suffix(".cli")
                 assert node.report["cli_file"] == str(cli_path)
                 selected = {a: Gains(**g) for a, g in node.report["selected"].items()}
-                assert cli_path.read_text() == bench_pid_core.render_cli(io.profile, selected)
+                assert cli_path.read_text().endswith(bench_pid_core.render_cli(io.profile, selected))
+                assert f"mode: {'ANGLE' if angle_mode else 'ACRO'}" in cli_path.read_text()
+                assert node.report["start_mode"] == ("ANGLE" if angle_mode else "ACRO")
                 assert current["armed"]
+                assert current["apply_checks"] > 0 and current["powered_sets"] > 0
+                assert node.report["reference_quaternion"] != [0, 0, 0, 1]
                 if custom_channel:
                     assert read_timeout_injected
-        if scenario not in ("complete", "custom-channel"):
+        if scenario not in ("complete", "custom-channel", "angle"):
             assert not list(tmp_path.glob("*.cli")) and "cli_file" not in node.report
         assert outputs and max(thrust for _, thrust in outputs) <= .12
         assert all(cmd not in (3, 4) for cmd, _ in io.calls)

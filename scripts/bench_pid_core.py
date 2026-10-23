@@ -4,6 +4,8 @@ from dataclasses import dataclass, asdict, replace
 import math
 import re
 
+from sitl_support import conjugate, multiply
+
 
 AXES = ("roll", "pitch", "yaw")
 
@@ -38,6 +40,93 @@ class Limits:
             raise ValueError("bench limits outside conservative supported bounds")
         if type(self.max_gain_change) is not int or not 1 <= self.max_gain_change <= 5:
             raise ValueError("max_gain_change must be an integer in [1,5]")
+
+
+@dataclass(frozen=True)
+class HoldLimits:
+    hold_gain: float = 2.0
+    hold_rate_dps: float = 10.0
+    settle_angle_deg: float = 2.0
+    settle_rate_dps: float = 2.0
+    settle_time_s: float = .2
+    settle_timeout_s: float = 4.0
+    apply_window_s: float = .2
+
+    def validate(self):
+        bounds = ((self.hold_gain, .5, 5), (self.hold_rate_dps, 2, 15),
+                  (self.settle_angle_deg, .5, 3), (self.settle_rate_dps, .5, 3),
+                  (self.settle_time_s, .1, .5), (self.settle_timeout_s, 1, 10),
+                  (self.apply_window_s, .08, .3))
+        if any(not math.isfinite(v) or not low <= v <= high for v, low, high in bounds):
+            raise ValueError("attitude-hold limits outside supported bounds")
+
+
+@dataclass(frozen=True)
+class AngleLimits:
+    angle_step_deg: float = 2.0
+    angle_step_s: float = 1.5
+    angle_tail_s: float = 1.5
+
+    def validate(self):
+        bounds = ((self.angle_step_deg, 1, 5), (self.angle_step_s, .5, 3), (self.angle_tail_s, .5, 3))
+        if any(not math.isfinite(v) or not low <= v <= high for v, low, high in bounds):
+            raise ValueError("ANGLE step limits outside supported bounds")
+
+
+def measure_angle(samples, amplitude):
+    """Samples: time, target angle, measured angle, cross-axis angle, angular-rate magnitude."""
+    if len(samples) < 40 or any(len(s) != 5 or not all(math.isfinite(v) for v in s) for s in samples):
+        raise RuntimeError("too few or non-finite ANGLE samples")
+    gaps = [b[0] - a[0] for a, b in zip(samples, samples[1:])]
+    if min(gaps) <= 0 or max(gaps) > .1:
+        raise RuntimeError("stale, reordered or sparse ANGLE samples")
+    for direction in (-1, 1):
+        pulse = [s for s in samples if direction * s[1] > 0]
+        if len(pulse) < 8:
+            raise RuntimeError("both ANGLE step directions required")
+        settled = pulse[len(pulse) * 3 // 4:]
+        gain = sum(direction * s[2] for s in settled) / (len(settled) * amplitude)
+        if not .6 <= gain <= 1.4:
+            raise RuntimeError("unusable ANGLE response; inspect outer loop/rig/throttle")
+    tail = samples[-max(10, len(samples) // 8):]
+    tail_rms = math.sqrt(sum(s[2] ** 2 for s in tail) / len(tail))
+    cross = max(abs(s[3]) for s in samples)
+    if max(abs(s[2]) for s in samples) > 1.5 * amplitude or tail_rms > .3 * amplitude \
+            or cross > .6 * amplitude or max(s[4] for s in tail) > 3:
+        raise RuntimeError("excessive ANGLE overshoot, ringdown or cross-axis motion")
+    duration = samples[-1][0] - samples[0][0]
+    error = sum(.5 * ((a[2]-a[1])**2 + (b[2]-b[1])**2) * dt
+                for a, b, dt in zip(samples, samples[1:], gaps)) / duration
+    return (math.sqrt(error) + tail_rms + cross) / amplitude
+
+
+def attitude_error(reference, current):
+    """Shortest rotation from current to captured orientation, in current body coordinates."""
+    normalized = []
+    for q in (reference, current):
+        if len(q) != 4 or not all(math.isfinite(v) for v in q):
+            raise ValueError("invalid hold quaternion")
+        norm = math.sqrt(sum(v * v for v in q))
+        if not .9 <= norm * norm <= 1.1:
+            raise ValueError("invalid hold quaternion norm")
+        normalized.append(tuple(v / norm for v in q))
+    error = multiply(conjugate(normalized[1]), normalized[0])
+    if error[3] < 0:
+        error = tuple(-v for v in error)
+    length = math.sqrt(sum(v * v for v in error[:3]))
+    if length < 1e-9:
+        return (0.0, 0.0, 0.0)
+    angle = 2 * math.atan2(length, max(0.0, error[3]))
+    return tuple(v * angle / length for v in error[:3])
+
+
+def holding_rates(reference, current, limits, excluded_axis=None):
+    error = attitude_error(reference, current)
+    rates = [max(-limits.hold_rate_dps, min(limits.hold_rate_dps, math.degrees(v) * limits.hold_gain))
+             for v in error]
+    if excluded_axis is not None:
+        rates[AXES.index(excluded_axis)] = 0.0
+    return tuple(rates)
 
 
 def setting_value(name, text):
@@ -153,6 +242,8 @@ class TuningSession:
                 raise RuntimeError(f"SET readback mismatch: {name}")
             if self.read(name) != str(value):
                 raise RuntimeError(f"GET verification mismatch: {name}")
+        if not recovery:
+            self.check()
         if self.cli(5, self.profile) != f"PID PROFILE {self.profile}":
             raise RuntimeError("PID apply was not acknowledged")
         self.report["active_gains"] = {"axis": axis, **asdict(gains)}

@@ -198,6 +198,7 @@ namespace custom_link_bridge
         double cmd_thrust = 0.0;                             // 0..1
         rclcpp::Time cmd_stamp{0, 0, RCL_ROS_TIME};
         bool cmd_valid = false;
+        bool cmd_angle = false;
         bool set_unarm = false;
 
         // 姿态/IMU 快照（0x10 读取线程写，本线程发布）

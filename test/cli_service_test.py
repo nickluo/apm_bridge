@@ -50,6 +50,7 @@ class FakeFc:
         self.bind_requests = []   # (req_id, args) for cmd 3
         self.save_requests = []   # (req_id, args) for cmd 4
         self.mode_reqs = []       # mode_req of every 0x20 seen
+        self.controls = []
         self.seq = 0
 
     def pump(self):
@@ -83,6 +84,7 @@ class FakeFc:
                 self.handle_cli(payload)
             elif msg_id == 0x20 and length == 20:
                 self.mode_reqs.append(payload[11])  # arm u8@10, mode_req u8@11
+                self.controls.append(struct.unpack("<QHBBH3h", payload))
 
     def handle_cli(self, payload):
         req_id = struct.unpack_from("<H", payload, 0)[0]

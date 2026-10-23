@@ -8,6 +8,19 @@ bench_pid_tuner:
     tuning_channel: 8
     # Raw normalized throttle, NOT m/s^2. Set using a prior propulsion/rig review.
     throttle: 0.12
+    # Hold the captured start orientation (not necessarily level), between trials.
+    hold_gain: 2.0
+    hold_rate_dps: 10.0
+    settle_angle_deg: 2.0
+    settle_rate_dps: 2.0
+    settle_time_s: 0.2
+    settle_timeout_s: 4.0
+    # Only actual APPLY_PID gets a brief zero-output window; never relax FC guards.
+    apply_window_s: 0.2
+    # ANGLE start: roll/pitch angle steps; yaw remains a rate test.
+    angle_step_deg: 2.0
+    angle_step_s: 1.5
+    angle_tail_s: 1.5
     rate_dps: 5.0
     pulse_s: 0.3
     tail_s: 0.8
