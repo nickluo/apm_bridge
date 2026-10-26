@@ -87,6 +87,10 @@ target_link_libraries(gimbal_selftest
 )
 target_link_libraries(gimbal_selftest xfgimbal)
 
+# 云台真机驱动端到端验收: 完整驱动闭环对真实云台断言发布位姿方向 (带外工具, 不进 ctest)
+add_executable(gimbal_driver_e2e test/gimbal_driver_e2e.cpp)
+target_link_libraries(gimbal_driver_e2e xfgimbal rclcpp::rclcpp tf2_ros::tf2_ros sensor_msgs::sensor_msgs)
+
 install(TARGETS
   custom_link_bridge_node
   gimbal_selftest

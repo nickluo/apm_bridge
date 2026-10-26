@@ -35,6 +35,7 @@ UAV_ANGLE = (100, -200, 300)  # 0.01deg [R,P,Y]
 UAV_ACCEL = (10, -20, 980)    # 0.01m/s2 NEU
 
 # 固定回复内容 (0.01deg): cam_angle=[滚转,俯仰,偏航], mtr_angle=[俯仰,滚转,偏航]
+# 注: 俯仰编码器低头为正 (台架实测), 与 cam_angle[1] (抬头正) 反号
 # CAM0_HIGH: [8.9, 9.8) 窗口内 cam_angle[0] (滚转) 从 8deg 变为 80deg,
 # 用于触发/退出 C-20S 的大滚转速度保持逻辑
 CAM_ANGLE = (800, -1200, 300)
@@ -142,14 +143,15 @@ def golden_op_values(cam0=CAM_ANGLE[0]):
     pitch = max(-150.0, min(150.0, scale12(-cam[1])))
 
     mtr_roll = f32(mtr[1] * 0.01)
-    mtr_pitch = f32(mtr[0] * 0.01)
+    # 台架实测 (2026-10-26): 俯仰编码器低头正, 驱动侧统一取反到抬头域后参与门控
+    mtr_pitch = f32(-mtr[0] * 0.01)
     enc = f32(mtr[2] * 0.01)
 
     maxed = False
     if abs(mtr_roll) >= 50.0:
         roll = 0.0
         maxed = True
-    if abs(mtr[0] - cam[1]) < int(40 * 100) and (mtr_pitch <= -135.0 or mtr_pitch >= 40.0):
+    if abs(mtr_pitch - f32(cam[1] * 0.01)) < 40.0 and (mtr_pitch <= -135.0 or mtr_pitch >= 40.0):
         pitch = 0.0
         maxed = True
 

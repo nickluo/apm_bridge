@@ -399,7 +399,7 @@ namespace
             tf2::Quaternion body;
             body.setRPY(pose[0] * radians, pose[1] * radians, pose[2] * radians);
             imu.orientation = tf2::toMsg(body);
-            simulator.reply.mtr_angle[0] = std::lround(pose[3] * 100);
+            simulator.reply.mtr_angle[0] = std::lround(-pose[3] * 100); // 编码器低头正 (台架实测)
             simulator.reply.mtr_angle[1] = pose[3] < 0 ? -2300 : 3100;
             simulator.reply.mtr_angle[2] = pose[3] < 0 ? 17000 : -6500;
             const auto before = capture.count();
@@ -434,7 +434,7 @@ namespace
             tf2::fromMsg(relative->orientation, relative_q);
             require(std::abs(actual.dot(heading * relative_q)) > .999999, "C20S heading applied twice");
             require(std::abs(msg.angular_velocity.x - 20 * radians) < 1e-5 &&
-                    std::abs(msg.angular_velocity.y + 10 * radians) < 1e-5 &&
+                    std::abs(msg.angular_velocity.y - 10 * radians) < 1e-5 &&
                     std::abs(msg.angular_velocity.z - 30 * radians) < 1e-5,
                     "C20S pitch/roll/yaw feedback order or FRD signs");
         }
@@ -496,7 +496,9 @@ namespace
                     require(std::abs(angle - previous) <= 140 * (dt + .005) + .03,
                             "Serial angle command stepped instead of following a bounded trajectory");
                     previous = angle;
-                    simulator.reply.mtr_angle[0] = pitch.op_value;
+                    // 实测语义: FPV/LOCK 角度 op 均抬头正, 编码器 = -op (姿态角略含水平偏置, 此处省略
+                    // 以保持 op 域跨模式连续, 断言聚焦符号语义)
+                    simulator.reply.mtr_angle[0] = static_cast<int16_t>(-pitch.op_value);
                     simulator.reply.cam_angle[1] = pitch.op_value;
                 }
                 stamp = now;
@@ -542,7 +544,7 @@ namespace
         bool fusion_seen = false;
         unsigned stop_packets = 0;
         xfrobot::Gcu2GbcPkt_t latest_control{};
-        int16_t pitch_encoder = -2000;
+        int16_t pitch_encoder = 2000; // 相机低头 20° (FLU Ry(+20°)) → 编码器低头正 +20°
         auto service = [&]() {
             std::array<uint8_t, 4096> input{};
             const auto count = ::read(pty.fd, input.data(), input.size());
@@ -622,7 +624,7 @@ namespace
                 std::abs(msg.orientation_covariance[2] - relative_yaw) < 1e-6,
                 "hardware legacy Euler slots do not match reconstructed orientation");
         require(std::abs(msg.angular_velocity.x - 2 * M_PI / 180) < 1e-6 &&
-                std::abs(msg.angular_velocity.y + M_PI / 180) < 1e-6 &&
+                std::abs(msg.angular_velocity.y - M_PI / 180) < 1e-6 &&
                 std::abs(msg.angular_velocity.z + 3 * M_PI / 180) < 1e-6,
                 "hardware FRD -> FLU gyro conversion");
         gimbal->setMode(apm_bridge::GimbalMode::AIM);
@@ -639,21 +641,21 @@ namespace
         for (const auto &axis : latest_control.gbc)
             require(axis.wk_mode == 1 && axis.op_type == 2 && std::abs(axis.op_value) <= 300,
                     "MISSION did not use limited locked real rates");
-        pitch_encoder = -13500;
+        pitch_encoder = 13500; // 姿态 -135° (下限) → 编码器 +135° (低头正)
         gimbal->updateTargetLos({true, .2, 0, 0, 0});
         drive(std::chrono::milliseconds(100), true);
         require(latest_control.gbc[1].op_value == 0, "MISSION pushed outward at lower pitch limit");
         gimbal->updateTargetLos({true, -.2, 0, 0, 0});
         drive(std::chrono::milliseconds(250), true);
         require(latest_control.gbc[1].op_value > 0, "MISSION could not return inward from lower pitch limit");
-        pitch_encoder = 4000;
+        pitch_encoder = -4000; // 姿态 +40° (上限) → 编码器 -40°
         gimbal->updateTargetLos({true, -.2, 0, 0, 0});
         drive(std::chrono::milliseconds(100), true);
         require(latest_control.gbc[1].op_value == 0, "MISSION pushed outward at upper pitch limit");
         gimbal->updateTargetLos({true, .2, 0, 0, 0});
         drive(std::chrono::milliseconds(250), true);
         require(latest_control.gbc[1].op_value < 0, "MISSION could not return inward from upper pitch limit");
-        pitch_encoder = -2000;
+        pitch_encoder = 2000;
         drive(std::chrono::milliseconds(1300), true);
         require(std::abs(latest_control.gbc[1].op_value) <= 1 && std::abs(latest_control.gbc[2].op_value) <= 1,
                 "MISSION stale target did not decelerate to hold");
@@ -748,7 +750,7 @@ namespace
             const auto body = toEnu(pose.orientation);
             const auto camera = toEnu(info.pose.orientation);
             const auto joints = apm_bridge::gimbalJointAngles(body.inverse() * camera, axes);
-            simulator.reply.mtr_angle[0] = std::lround(joints[1] * 18000 / M_PI);
+            simulator.reply.mtr_angle[0] = std::lround(-joints[1] * 18000 / M_PI); // 编码器低头正
             simulator.reply.mtr_angle[1] = std::lround(joints[0] * 18000 / M_PI);
             simulator.reply.mtr_angle[2] = std::lround(joints[2] * 18000 / M_PI);
             auto imu = vehicle(0);
