@@ -497,8 +497,10 @@ void GimbalControl::run()
                         pitch_exp = (cfg.pitch_hold_deg - last_response.cam_angle[1] * 0.01f) * cfg.pitch_roll_speed_scale;
                         pitch_exp = std::clamp(pitch_exp, -max_rate_dps, max_rate_dps);
 
-                        float mtr_pitch = last_response.mtr_angle[0] * 0.01f;
-                        if (std::abs(last_response.mtr_angle[0] - last_response.cam_angle[1]) < static_cast<int>(cfg.pitch.max_deg * 100) && (mtr_pitch <= cfg.pitch.min_deg || mtr_pitch >= cfg.pitch.max_deg))
+                        // 编码器低头正 (台架实测): 取反到抬头域再与限位比较,
+                        // 否则门控方向相反会把云台推进机械限位。C-40D/C-200T 待实机复验。
+                        const float mtr_pitch = -last_response.mtr_angle[0] * 0.01f;
+                        if (std::abs(mtr_pitch - last_response.cam_angle[1] * 0.01f) < cfg.pitch.max_deg && (mtr_pitch <= cfg.pitch.min_deg || mtr_pitch >= cfg.pitch.max_deg))
                         {
                             pitch_exp = 0.0f;
                             max = true;
@@ -552,14 +554,21 @@ void GimbalControl::run()
                     if (camera_pose_valid)
                     {
                         const double radians = 0.01 * M_PI / 180.0;
+                        // 台架实测 (C-20S 立装, 2026-10-26): 俯仰编码器低头为正
+                        // (cam_angle[1] ≈ -mtr_angle[0] + 慢漂移水平偏置), 需取反成
+                        // 运动学约定的 FRD 抬头正。C-20S 无滚转/偏航电机 (mtr 恒 0), 其编码器符号
+                        // 在本机不可测, 沿用原值 (C-40D/C-200T 待验)。
                         camera_orientation = apm_bridge::gimbalCameraToWorld(vehicle_orientation,
-                            {last_response.mtr_angle[1] * radians, last_response.mtr_angle[0] * radians,
+                            {last_response.mtr_angle[1] * radians, -last_response.mtr_angle[0] * radians,
                              last_response.mtr_angle[2] * radians},
                             {cfg.roll.present, cfg.pitch.present, cfg.yaw.present});
                         camera_heading = vehicle_heading;
                     }
+                    // 陀螺域 (2026-10-26 台架手动激励实测, 三轮复验): cam_rate[0]+ = 低头 (=FLU 俯仰速率+,
+                    // 与 cam_angle[1] 反号); cam_rate[1]+ = 右滚 (=FLU 滚转速率+, 与 cam_angle[0] 同号);
+                    // cam_rate[2]+ = 右偏航 (罗盘式, FLU 偏航取反, 与 cam_angle[2] 同号)。
                     ema_filter.filter( last_response.cam_rate[1] * 0.1f, 0);    // Roll rate
-                    ema_filter.filter(-last_response.cam_rate[0] * 0.1f, 1);    // Pitch rate
+                    ema_filter.filter( last_response.cam_rate[0] * 0.1f, 1);    // Pitch rate
                     ema_filter.filter(-last_response.cam_rate[2] * 0.1f, 2);    // Yaw rate
                 }
 
@@ -594,7 +603,9 @@ void GimbalControl::smoothAngleCommands(double dt, bool fresh_feedback)
     for (size_t i = 0; i < axes.size(); ++i)
         if (!angle_trajectory_ready || !angle_axes[i])
         {
-            seed[i] = last_response.mtr_angle[encoder[i]] * .01;
+            // FPV 角度命令域与编码器反号 (台架实测: FPV op -> mtr_angle = -op, C-20S 俯仰;
+            // 滚转/偏航按对称假设, 三轴机待验), 轨迹播种须在 op 域取反编码器。
+            seed[i] = -last_response.mtr_angle[encoder[i]] * .01;
             // LOCK angle targets are world pitch; FPV targets are joint-relative.
             if (control_mode == apm_bridge::GimbalMode::HORIZON && i == 1)
                 seed[i] = last_response.cam_angle[1] * .01;
@@ -688,7 +699,9 @@ void GimbalControl::updateMissionControl(double dt)
     for (int i = 0; i < 3; ++i)
     {
         double speed = rates[i] * signs[i] * 180.0 / M_PI;
-        const double angle = last_response.mtr_angle[encoder[i]] * 0.01;
+        // 编码器低头正: 取反到抬头域, 与限位 (FRD 抬头正) 和速度符号同域比较,
+        // 否则门控方向相反会把云台推进机械限位 (台架实测)。
+        const double angle = -last_response.mtr_angle[encoder[i]] * 0.01;
         if (!axes[i].present || protection ||
             (axes[i].min_deg < axes[i].max_deg &&
              ((angle <= axes[i].min_deg && speed < 0) || (angle >= axes[i].max_deg && speed > 0))))
@@ -977,7 +990,9 @@ void GimbalControl::sendControlPacket()
         packet.cmd.value = CMD_MANUAL_CONTROL;
     packet.cmd.trig = cmd_trig_counter++; // 递增触发计数器
 
-    packet.aux.fl_sens = 0;
+    // FPV 跟随灵敏度: 台架实测 fl_sens=0 时角度跟踪仅 ~0.2°/s 爬行 (AIM 不可用),
+    // 15 时干脆收敛; 协议范围 [-16,15], 仅 FPV 模式生效。
+    packet.aux.fl_sens = ctrl_wk_mode == WK_MODE_FPV ? 15 : 0;
 
     // 3. 填充三轴控制: 锁定模式; 手动控制路径按控制律给定的 op_type/op_value
     //    (C-40D/C-200T 真实角速度; C-20S 角度/速度保持切换)。
