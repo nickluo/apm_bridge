@@ -237,7 +237,7 @@ class Harness:
                     if self.state["esc_valid"] & (1 << i):
                         sums[i] += rpm[i]
                         n[i] += 1
-        return tuple(s / n[i] if n[i] else None for i in range(8)), n
+        return tuple(sums[i] / n[i] if n[i] else None for i in range(8)), n
 
     def close(self):
         self.running = False
