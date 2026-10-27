@@ -7,6 +7,22 @@ from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 
+# Node parameters default from parameters/custom_link_parameters.yaml; the
+# launch arguments below override individual values only when explicitly
+# given (their empty default means "keep the YAML value").
+# (launch argument, node parameter, parameter type)
+_ARG_OVERRIDES = (
+    ('transport', 'link.transport', str),
+    ('serial_port', 'link.serial_port', str),
+    ('baudrate', 'link.baudrate', int),
+    ('tcp_host', 'link.tcp_host', str),
+    ('tcp_port', 'link.tcp_port', int),
+    ('gimbal_port', 'gimbal_port', str),
+    ('gimbal_model', 'gimbal.model', str),
+    ('pitch_hold', 'gimbal.pitch_hold', float),
+    ('pitch_aim', 'gimbal.pitch_aim', float),
+)
+
 
 def _launch_node(context):
     """
@@ -22,26 +38,19 @@ def _launch_node(context):
       * the link UART assigned the CUSTOM_LINK function (defaults seed it)
       * OFFBOARD requested through the custom link or a pilot AUX switch;
         firmware safety checks and pilot takeover arbitration remain active
+
+    Parameter defaults live in parameters/custom_link_parameters.yaml; the
+    declared launch arguments override individual values only when
+    explicitly given on the command line (empty keeps the YAML value).
     """
     pkg_share = get_package_share_directory('apm_bridge')
-    parameters = [
+    # mixed parameter sources: the YAML file plus optional override dicts
+    parameters: list = [
         os.path.join(pkg_share, 'parameters', 'custom_link_parameters.yaml'),
-        {
-            'link.transport': LaunchConfiguration('transport'),
-            'link.serial_port': LaunchConfiguration('serial_port'),
-            'link.baudrate': LaunchConfiguration('baudrate'),
-            'link.tcp_host': LaunchConfiguration('tcp_host'),
-            'link.tcp_port': LaunchConfiguration('tcp_port'),
-        },
-        {'gimbal_port': LaunchConfiguration('gimbal_port')},
-        {'gimbal.model': LaunchConfiguration('gimbal_model')},
     ]
-    pitch_hold = LaunchConfiguration('pitch_hold').perform(context)
-    if pitch_hold:
-        parameters.append({'gimbal.pitch_hold': ParameterValue(LaunchConfiguration('pitch_hold'), value_type=float)})
-    pitch_aim = LaunchConfiguration('pitch_aim', default='')
-    if pitch_aim.perform(context):
-        parameters.append({'gimbal.pitch_aim': ParameterValue(pitch_aim, value_type=float)})
+    for arg, param, value_type in _ARG_OVERRIDES:
+        if LaunchConfiguration(arg).perform(context):
+            parameters.append({param: ParameterValue(LaunchConfiguration(arg), value_type=value_type)})
 
     custom_link_node = Node(
         package='apm_bridge',
@@ -65,31 +74,36 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument(
             'transport',
-            default_value='serial',
-            description="'serial' for a real FC UART, 'tcp' for Betaflight SITL."
+            default_value='',
+            description="'serial' for a real FC UART, 'tcp' for Betaflight SITL; "
+                        'empty keeps the custom_link_parameters.yaml value.'
         ),
         DeclareLaunchArgument(
             'serial_port',
-            default_value='/dev/ttyTHS1',
-            description='Serial port wired to the FC link UART (FUNCTION_CUSTOM_LINK).'
+            default_value='',
+            description='Serial port wired to the FC link UART (FUNCTION_CUSTOM_LINK); '
+                        'empty keeps the custom_link_parameters.yaml value.'
         ),
         DeclareLaunchArgument(
             'baudrate',
-            default_value='921600',
-            description='Link baudrate; must match the FC port configuration.'
+            default_value='',
+            description='Link baudrate; must match the FC port configuration; '
+                        'empty keeps the custom_link_parameters.yaml value.'
         ),
         DeclareLaunchArgument(
-            'tcp_host', default_value='127.0.0.1', description='SITL host.'
+            'tcp_host', default_value='',
+            description='SITL host; empty keeps the custom_link_parameters.yaml value.'
         ),
         DeclareLaunchArgument(
-            'tcp_port',
-            default_value='5763',
-            description='SITL TCP port of the link UART (UART3 = 5763).'
+            'tcp_port', default_value='',
+            description='SITL TCP port of the link UART (UART3 = 5763); '
+                        'empty keeps the custom_link_parameters.yaml value.'
         ),
         DeclareLaunchArgument(
             'gimbal_port',
             default_value='',
-            description='Gimbal serial port. Empty selects a fixed-pitch strapdown camera.'
+            description='Gimbal serial port (empty YAML value selects a fixed-pitch '
+                        'strapdown camera); empty keeps the custom_link_parameters.yaml value.'
         ),
         DeclareLaunchArgument(
             'pitch_hold',
@@ -98,8 +112,9 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             'gimbal_model',
-            default_value='C20S',
-            description="Gimbal model: 'C20S' (1-axis), 'C40D' (2-axis) or 'C200T' (3-axis)."
+            default_value='',
+            description="Gimbal model: 'C20S' (1-axis), 'C40D' (2-axis) or 'C200T' (3-axis); "
+                        'empty keeps the custom_link_parameters.yaml value.'
         ),
         DeclareLaunchArgument(
             'pitch_aim', default_value='',

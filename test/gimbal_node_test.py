@@ -331,9 +331,10 @@ def test_actual_node_modes_and_los_subscription(tmp_path, monkeypatch):
             armed = True
             pump(2.4)
             assert modes[-1] == "AIM"
-            assert controls[-1].wk_mode == [2, 2, 2]
+            assert controls[-1].wk_mode == [1, 1, 1]
+            assert controls[-1].op_type == [2, 2, 2]
             assert controls[-1].op_value[0] == controls[-1].op_value[2] == 0
-            assert abs(controls[-1].op_value[1] - 3500) <= 1
+            assert 0 < controls[-1].op_value[1] <= 1500, controls[-1].op_value[1]
             assert "AIM requested" not in log_path.read_text()
             mission = offboard = True
             wait_for(lambda: modes[-1] == "MISSION")

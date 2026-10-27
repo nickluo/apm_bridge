@@ -43,7 +43,7 @@ namespace apm_bridge
         {
             if (!std::isfinite(gain) || gain <= 0 ||
                 !std::isfinite(rate_feedforward) || rate_feedforward < 0 ||
-                !std::isfinite(max_rate_dps) || max_rate_dps <= 0 || max_rate_dps > 150 ||
+                !std::isfinite(max_rate_dps) || max_rate_dps <= 0 || max_rate_dps > 1500 ||
                 !std::isfinite(max_accel_dps2) || max_accel_dps2 <= 0 ||
                 !std::isfinite(filter_tau) || filter_tau <= 0 ||
                 !std::isfinite(los_timeout) || los_timeout <= 0)

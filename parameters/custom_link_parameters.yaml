@@ -76,8 +76,8 @@ custom_link_bridge:
       # AIM 相对机身俯仰期望为 90 + pitch_aim (deg)，对齐 ROS FLU +Z（向上）。
       pitch_aim: -10.0
       tracking_gain: 2.0
-      tracking_max_rate: 150.0 # deg/s，每轴统一角速度上限。
-      tracking_max_accel: 600.0 # deg/s^2.
+      tracking_max_rate: 600.0 # deg/s，每轴统一角速度上限。
+      tracking_max_accel: 900.0 # deg/s^2.
       tracking_filter_tau: 0.12 # seconds.
       los_timeout: 0.5 # seconds.
       # 云台机型: C20S (单轴) / C40D (卧式两轴) / C200T (三轴)，决定参与控制的轴。

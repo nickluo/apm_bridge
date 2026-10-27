@@ -176,6 +176,9 @@ GimbalConfig GimbalConfig::fromParameters(rclcpp::Node &node)
     cfg.pitch_roll_speed_scale = param_f("gimbal.pitch_roll_speed_scale", cfg.pitch_roll_speed_scale);
     cfg.yaw_speed_scale = param_f("gimbal.yaw_speed_scale", cfg.yaw_speed_scale);
     cfg.pitch_aim_deg = param_f("gimbal.pitch_aim", cfg.pitch_aim_deg);
+    cfg.aim_follow_gain = param_f("gimbal.aim_follow_gain", cfg.aim_follow_gain);
+    if (!std::isfinite(cfg.aim_follow_gain) || cfg.aim_follow_gain <= 0 || cfg.aim_follow_gain > 100)
+        throw std::invalid_argument("Invalid gimbal AIM follow gain (0,100]");
     cfg.pitch_hold_deg = param_f("gimbal.pitch_hold", cfg.pitch_hold_deg);
     cfg.roll_hold_enter_deg = param_f("gimbal.roll_hold_enter", cfg.roll_hold_enter_deg);
     cfg.roll_hold_exit_deg = param_f("gimbal.roll_hold_exit", cfg.roll_hold_exit_deg);
@@ -339,6 +342,8 @@ void GimbalControl::updateVehicleState(const sensor_msgs::msg::Imu &imu, double 
         std::lock_guard<std::mutex> lock(mtx);
         vehicle_heading = yaw;
         vehicle_orientation = q;
+        // BF 陀螺 FLU 俯仰速率低头正; 转抬头域供 AIM 前馈
+        vehicle_pitch_rate_up = -imu.angular_velocity.y * 180.0 / M_PI;
         vehicle_stamp = std::chrono::steady_clock::now();
     }
     if (!cfg.send_uav_data)
@@ -416,13 +421,46 @@ void GimbalControl::run()
                     ctrl_op_value[i] = 0;
                 }
             }
-            ctrl_wk_mode = control_mode == apm_bridge::GimbalMode::AIM ? WK_MODE_FPV : WK_MODE_LOCK;
+            // AIM: LOCK+真实角速度, P(位置)+FF(载机俯仰速率前馈)。角度通道方案实测
+            // 滞后 ~0.15s (固件角度环内轨迹 + 驱动轨迹 8x 误差项), 速率通道台架实测
+            // 严格 1:1 即时响应, 滞后降至更新周期量级。目标角 = 机身抬头角 +
+            // 相对角 (90+pitch_aim); 不使用云台 FPV 跟随/uav 融合 (固件无 uav 数据时
+            // 不随机身转动, 且约定 send_uav_data 恒 false)。滚转/偏航轴锁定当前姿态。
+            ctrl_wk_mode = WK_MODE_LOCK;
             if (control_mode == apm_bridge::GimbalMode::AIM)
+            {
+                double body_rate_ff = 0;
+                bool feedback_fresh = false;
+                {
+                    std::lock_guard<std::mutex> lock(mtx);
+                    feedback_fresh = feedback_stamp != std::chrono::steady_clock::time_point{} &&
+                        now - feedback_stamp <= std::chrono::milliseconds(UAV_DATA_TIMEOUT_MS);
+                    if (vehicle_stamp != std::chrono::steady_clock::time_point{} &&
+                        now - vehicle_stamp <= std::chrono::milliseconds(UAV_DATA_TIMEOUT_MS))
+                    {
+                        double roll_c, pitch_c, yaw_c;
+                        tf2::Matrix3x3(vehicle_orientation).getRPY(roll_c, pitch_c, yaw_c);
+                        aim_body_pitch_deg = -pitch_c * 180.0 / M_PI; // FLU 俯仰低头正 → 抬头角
+                        body_rate_ff = vehicle_pitch_rate_up;
+                    }
+                }
                 for (int i = 0; i < 3; ++i)
                 {
-                    ctrl_op_type[i] = OP_TYPE_ANGLE;
-                    ctrl_op_value[i] = static_cast<int16_t>(std::round(aim_target_degrees[i] * 100.0));
+                    ctrl_op_type[i] = OP_TYPE_REAL_SPEED;
+                    ctrl_op_value[i] = 0;
                 }
+                const double target = aim_target_degrees[1] + aim_body_pitch_deg;
+                const double error = target - last_response.cam_angle[1] * 0.01; // 同抬头域
+                double speed = cfg.aim_follow_gain * error + body_rate_ff;
+                const double joint = -last_response.mtr_angle[0] * 0.01; // 编码器低头正 → 抬头域
+                if (cfg.pitch.min_deg < cfg.pitch.max_deg &&
+                    ((joint <= cfg.pitch.min_deg && speed < 0) || (joint >= cfg.pitch.max_deg && speed > 0)))
+                    speed = 0; // 机械限位门: 只拦朝限位方向
+                speed = std::clamp(speed, -cfg.tracking.max_rate_dps, cfg.tracking.max_rate_dps);
+                if (!feedback_fresh)
+                    speed = 0; // 反馈过期: 锁定当前姿态
+                ctrl_op_value[1] = static_cast<int16_t>(std::round(speed * 10.0));
+            }
             // 尝试读取返回包
             if (readPacket())
             {
@@ -603,11 +641,10 @@ void GimbalControl::smoothAngleCommands(double dt, bool fresh_feedback)
     for (size_t i = 0; i < axes.size(); ++i)
         if (!angle_trajectory_ready || !angle_axes[i])
         {
-            // FPV 角度命令域与编码器反号 (台架实测: FPV op -> mtr_angle = -op, C-20S 俯仰;
-            // 滚转/偏航按对称假设, 三轴机待验), 轨迹播种须在 op 域取反编码器。
+            // 角度命令域: AIM/HORIZON 均为 LOCK 相机姿态角域 (抬头正), 俯仰从 cam_angle[1] 播种。
+            // (FPV 相对角域与编码器反号: FPV op -> mtr = -op, 台架实测; 驱动现已不使用 FPV。)
             seed[i] = -last_response.mtr_angle[encoder[i]] * .01;
-            // LOCK angle targets are world pitch; FPV targets are joint-relative.
-            if (control_mode == apm_bridge::GimbalMode::HORIZON && i == 1)
+            if (i == 1)
                 seed[i] = last_response.cam_angle[1] * .01;
             rates[i] = 0;
         }
@@ -990,8 +1027,8 @@ void GimbalControl::sendControlPacket()
         packet.cmd.value = CMD_MANUAL_CONTROL;
     packet.cmd.trig = cmd_trig_counter++; // 递增触发计数器
 
-    // FPV 跟随灵敏度: 台架实测 fl_sens=0 时角度跟踪仅 ~0.2°/s 爬行 (AIM 不可用),
-    // 15 时干脆收敛; 协议范围 [-16,15], 仅 FPV 模式生效。
+    // FPV 跟随灵敏度 (台架实测: 0 时 ~0.2°/s 爬行, 15 干脆收敛)。AIM 已改用 LOCK
+    // 同步实现, 驱动当前不再使用 FPV 模式; 保留条件以备将来启用。
     packet.aux.fl_sens = ctrl_wk_mode == WK_MODE_FPV ? 15 : 0;
 
     // 3. 填充三轴控制: 锁定模式; 手动控制路径按控制律给定的 op_type/op_value

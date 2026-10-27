@@ -156,6 +156,9 @@ struct GimbalConfig
 
     // AIM: camera +X aims toward body FLU +Z, with a nose-up pitch offset.
     float pitch_aim_deg = 0.0f;
+    // AIM 速率跟随环: 位置增益 (1/s), 与机身俯仰速率前馈 (增益 1) 配合,
+    // 目标角误差 → LOCK+真实角速度指令。台架实测滞后 ~0.05s (角度环方案 ~0.15s)。
+    float aim_follow_gain = 8.0f;
 
     // HORIZON alone holds this angle above horizontal; MISSION centers LOS at zero.
     // Positive values retain the vendor nose-up convention.
@@ -187,7 +190,7 @@ struct GimbalConfig
      *       gimbal.yaw_min/yaw_max (deg),
      *       gimbal.pitch_roll_speed_scale, gimbal.yaw_speed_scale,
      *       gimbal.send_uav_data,
-     *       gimbal.pitch_aim, gimbal.pitch_hold, gimbal.roll_hold_enter, gimbal.roll_hold_exit,
+     *       gimbal.pitch_aim, gimbal.aim_follow_gain, gimbal.pitch_hold, gimbal.roll_hold_enter, gimbal.roll_hold_exit,
      *       gimbal.tracking_gain/tracking_rate_feedforward/tracking_max_rate/tracking_max_accel,
      *       gimbal.tracking_filter_tau/los_timeout
      *       (tracking_max_rate 是所有模式的统一每轴角速度上限, 原 max_angle_speed 已并入)
@@ -314,6 +317,8 @@ private:
     std::array<bool, 3> angle_axes{};
     std::atomic<apm_bridge::GimbalMode> mode{apm_bridge::GimbalMode::HORIZON};
     apm_bridge::GimbalMode control_mode = apm_bridge::GimbalMode::HORIZON;
+    double aim_body_pitch_deg = 0;   // AIM LOCK 同步: 载机抬头角缓存 (数据过期时冻结)
+    double vehicle_pitch_rate_up = 0; // 载机抬头角速率 (deg/s, AIM 前馈)
     std::chrono::steady_clock::time_point control_stamp{};
     std::chrono::steady_clock::time_point feedback_stamp{};
     rclcpp::Time orientation_stamp{0, 0, RCL_ROS_TIME};

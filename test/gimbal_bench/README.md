@@ -17,3 +17,11 @@
 ```
 注意：若上一工具退出时发过 STOP（如 gimbal_selftest/驱动），需先发 START（probe 脚本会在
 首包发 cmd=2 的场合自行处理；手动场景用 probe_rate_fpv_domain.py 开头补发）。
+
+## `mission_live.py` — MISSION 模式真机验证
+
+真云台 + 真节点 + 假飞控(TCP) + 闭环 LOS 仿真（订阅 /fpv/gimbal 按固定世界目标计算 LOS）。
+场景覆盖：AIM→MISSION 进入、目标收敛（−10°/+20°）、LOS 超时保持、退 MISSION→HORIZON 回平、
+解除武装→AIM。用法：`ROS_DOMAIN_ID=<id> python3 mission_live.py`（云台需在 /dev/ttyUSB1，可改脚本）。
+注意：armed 必须先于 mission 置位（同时置位会因 mission_blocked 锁存而进不了 MISSION——
+真机流程中由拦截器保证此顺序）；假飞控 0x12 的 mode_flags 需带 OFFBOARD 位 (1<<13) 使 rc_manual=false。

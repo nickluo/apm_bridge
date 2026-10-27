@@ -438,8 +438,10 @@ namespace
                     std::abs(msg.angular_velocity.z - 30 * radians) < 1e-5,
                     "C20S pitch/roll/yaw feedback order or FRD signs");
         }
+        imu.orientation = tf2::toMsg(tf2::Quaternion(0, 0, 0, 1)); // AIM 目标角回 75° (水平机身)
         drive(1500);
-        require(std::abs(simulator.control.gbc[1].op_value - 7500) <= 1, "C20S AIM ignored corrected pitch limits");
+        require(simulator.control.gbc[1].op_type == 2 && simulator.control.gbc[1].op_value == 1400,
+                "C20S AIM rate did not saturate toward the corrected pitch target");
         drive(260, false);
         const auto stale_count = capture.count();
         drive(40, false);
@@ -481,6 +483,7 @@ namespace
         gimbal.setMode(apm_bridge::GimbalMode::AIM);
         gimbal.start();
         double previous = 0;
+        double fake_cam = 0; // 假云台姿态角累加器 (double, 避免逐次 int16 截断)
         auto stamp = std::chrono::steady_clock::now();
         auto drive = [&](int milliseconds) {
             const auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(milliseconds);
@@ -496,17 +499,27 @@ namespace
                     require(std::abs(angle - previous) <= 140 * (dt + .005) + .03,
                             "Serial angle command stepped instead of following a bounded trajectory");
                     previous = angle;
-                    // 实测语义: FPV/LOCK 角度 op 均抬头正, 编码器 = -op (姿态角略含水平偏置, 此处省略
-                    // 以保持 op 域跨模式连续, 断言聚焦符号语义)
+                    // 实测语义: LOCK 角度 op 抬头正, 姿态角=op, 编码器=-op
+                    fake_cam = pitch.op_value;
                     simulator.reply.mtr_angle[0] = static_cast<int16_t>(-pitch.op_value);
                     simulator.reply.cam_angle[1] = pitch.op_value;
+                }
+                else if (simulator.control.cmd.value == 4 && pitch.op_type == 2)
+                {
+                    // 实测语义: 真实角速度 op (抬头正, 0.1deg/s) 严格积分进姿态角
+                    const double dt = std::chrono::duration<double>(now - stamp).count();
+                    fake_cam += pitch.op_value * 10.0 * std::min(dt, 0.05); // op 0.1deg/s -> 0.01deg 计数
+                    previous = fake_cam * .01; // 保持角度跟踪连续, 域切换不误报跳变
+                    simulator.reply.cam_angle[1] = static_cast<int16_t>(std::lround(fake_cam));
+                    simulator.reply.mtr_angle[0] = static_cast<int16_t>(-std::lround(fake_cam));
                 }
                 stamp = now;
                 std::this_thread::sleep_for(std::chrono::milliseconds(2));
             }
         };
         drive(2000);
-        require(std::abs(previous - 80) < .05, "Serial AIM trajectory did not settle");
+        require(std::abs(simulator.reply.cam_angle[1] * .01 - 80) < .5,
+                "Serial AIM rate follow did not settle");
         gimbal.setMode(apm_bridge::GimbalMode::HORIZON);
         drive(2000);
         require(std::abs(previous) < .05, "Serial LOCK angle trajectory did not settle");
@@ -630,9 +643,12 @@ namespace
         gimbal->setMode(apm_bridge::GimbalMode::AIM);
         drive(std::chrono::milliseconds(4000), true);
         for (const auto &axis : latest_control.gbc)
-            require(axis.wk_mode == 2 && axis.op_type == 0, "AIM is not FPV angle control");
-        require(latest_control.gbc[0].op_value == 0 && latest_control.gbc[1].op_value == 4000 &&
-                latest_control.gbc[2].op_value == 0, "AIM body +Z target did not respect default pitch limit");
+            require(axis.wk_mode == 1, "AIM is not LOCK mode");
+        require(latest_control.gbc[0].op_type == 2 && latest_control.gbc[1].op_type == 2 &&
+                latest_control.gbc[2].op_type == 2, "AIM pitch is not LOCK rate control");
+        require(latest_control.gbc[0].op_value == 0 && latest_control.gbc[2].op_value == 0 &&
+                latest_control.gbc[1].op_value == 300,
+                "AIM rate did not saturate toward the pitch-limited +Z target");
         gimbal->setMode(apm_bridge::GimbalMode::MISSION);
         gimbal->updateTargetLos({true, .2, -.3, .05, -.07});
         drive(std::chrono::milliseconds(200), true);
