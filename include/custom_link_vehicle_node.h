@@ -5,6 +5,7 @@
 #include <std_msgs/msg/bool.hpp>
 #include <std_msgs/msg/header.hpp>
 #include <std_msgs/msg/int8.hpp>
+#include <std_msgs/msg/float32_multi_array.hpp>
 #include <std_msgs/msg/float64.hpp>
 #include <std_msgs/msg/string.hpp>
 #include <geometry_msgs/msg/twist_stamped.hpp>
@@ -97,6 +98,9 @@ namespace custom_link_bridge
         rclcpp::Publisher<std_msgs::msg::String>::SharedPtr gimbal_mode_pub;
         rclcpp::Publisher<std_msgs::msg::Header>::SharedPtr trigger_pub;
         rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr altitude_pub;
+        // ESC 转速遥测 (0x16 PayloadEscTelemetry 携带，100 Hz)；data[i] 为电机
+        // i 机械转速 rpm（固件按 motor_poles 换算后下发），无遥测的电机为 NaN
+        rclcpp::Publisher<std_msgs::msg::Float32MultiArray>::SharedPtr motor_rpm_pub;
         // GPS / mAh / 失效保护 (0x12 PayloadSlow 携带，10 Hz)
         rclcpp::Publisher<mavros_msgs::msg::GPSRAW>::SharedPtr gpsraw_pub;
         rclcpp::Publisher<sensor_msgs::msg::NavSatFix>::SharedPtr navsat_pub;
@@ -161,6 +165,7 @@ namespace custom_link_bridge
         void handleMedium(const custom_link::protocol::PayloadMedium &p, int64_t hostUs);
         void handleSlow(const custom_link::protocol::PayloadSlow &p, int64_t hostUs);
         void handleOdometry(const custom_link::protocol::PayloadOdometry &p, int64_t hostUs);
+        void handleEscTelemetry(const custom_link::protocol::PayloadEscTelemetry &p, int64_t hostUs);
         void publishImu(int64_t hostUs);
         void publishState(uint32_t mode_flags, bool armed);
 

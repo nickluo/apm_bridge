@@ -30,6 +30,7 @@ namespace custom_link
             MSG_FC_SLOW = 0x12,        // 10 Hz battery/gps/modes/status
             MSG_FC_ODOMETRY = 0x14,    // 100 Hz GPS-valid ARM-relative ENU odometry
             MSG_FC_CLI = 0x15,         // CLI 设置读写响应（分块）
+            MSG_FC_ESC_TELEMETRY = 0x16, // 100 Hz 双向 DShot ESC eRPM（每电机）
             MSG_HOST_CONTROL = 0x20,   // host -> FC control setpoints
             MSG_HOST_CLI = 0x24,       // host -> FC CLI 设置读写请求
             MSG_HOST_TIMESYNC = 0x30,  // host -> FC time sync request (u64 T1)
@@ -100,6 +101,14 @@ namespace custom_link
             int16_t arm_yaw_cdeg;       // ARM yaw, same North-yaw convention as attitude_cdeg
         };
 
+        struct PayloadEscTelemetry
+        {
+            uint32_t ts_us;            // FC micros() 时间戳
+            uint8_t count;             // 上报的电机数
+            uint8_t valid;             // 位掩码：bit i = 电机 i 有实时转速
+            uint16_t rpm[8];           // 每电机机械转速 rpm（固件已按 motor_poles 换算）
+        };
+
         struct PayloadTimesyncReq
         {
             uint64_t t1;
@@ -144,6 +153,7 @@ namespace custom_link
         static_assert(sizeof(PayloadTimesyncResp) == 16, "timesync resp size");
         static_assert(sizeof(PayloadCliReq) == 64, "cli req size");
         static_assert(sizeof(PayloadCliResp) == 64, "cli resp size");
+        static_assert(sizeof(PayloadEscTelemetry) == 22, "esc telemetry payload size");
 
         constexpr uint8_t CLI_CMD_GET = 0;    // args = 设置名 -> "name = value"
         constexpr uint8_t CLI_CMD_SET = 1;    // args = "name = value" -> 成功回读

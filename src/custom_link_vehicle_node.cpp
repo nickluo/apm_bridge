@@ -172,6 +172,8 @@ CustomLinkVehicleNode::CustomLinkVehicleNode()
     navsat_pub = this->create_publisher<sensor_msgs::msg::NavSatFix>(
         "/mavros/global_position/global", rclcpp::QoS(rclcpp::KeepLast(10)).best_effort());
     failsafe_pub = this->create_publisher<std_msgs::msg::Bool>("/fpv/failsafe", 10);
+    // ESC 转速 (0x16 PayloadEscTelemetry, 100 Hz)：data[i] = 电机 i 机械 rpm
+    motor_rpm_pub = this->create_publisher<std_msgs::msg::Float32MultiArray>("/fpv/motor_rpm", 10);
 
     control_command_sub = this->create_subscription<quadrotor_msgs::msg::ControlCommand>(
         "~/control_command", rclcpp::QoS(rclcpp::KeepLast(1)).best_effort(),
@@ -387,6 +389,16 @@ CustomLinkVehicleNode::CustomLinkVehicleNode()
                 else
                     RCLCPP_ERROR_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
                                          "Invalid custom-link odometry payload size: %u", frame.len);
+                break;
+            }
+            case MSG_FC_ESC_TELEMETRY:
+            {
+                PayloadEscTelemetry p;
+                if (frame.as(p))
+                    handleEscTelemetry(p, hostUs);
+                else
+                    RCLCPP_ERROR_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                                         "Invalid custom-link ESC telemetry payload size: %u", frame.len);
                 break;
             }
             default:
@@ -792,6 +804,27 @@ void CustomLinkVehicleNode::handleOdometry(const custom_link::protocol::PayloadO
         }
     }
     odom_pub->publish(msg);
+}
+
+void CustomLinkVehicleNode::handleEscTelemetry(const custom_link::protocol::PayloadEscTelemetry &p, int64_t hostUs)
+{
+    // 机械 rpm 由固件按 motor_poles 换算后直接下发，桥只透传。valid 位缺失
+    //（双向 DShot 未开/首个 eRPM 帧未到）的电机输出 NaN，下游用 isnan 判别
+    // 而不是把 0 误读为停转。
+    std_msgs::msg::Float32MultiArray msg;
+    msg.layout.dim.resize(1);
+    msg.layout.dim[0].label = "motor";
+    msg.layout.dim[0].size = p.count;
+    msg.layout.dim[0].stride = p.count;
+    msg.data.reserve(p.count);
+    for (uint8_t i = 0; i < p.count; ++i)
+    {
+        if (p.valid & (1u << i))
+            msg.data.push_back(p.rpm[i]);
+        else
+            msg.data.push_back(std::numeric_limits<float>::quiet_NaN());
+    }
+    motor_rpm_pub->publish(msg);
 }
 
 void CustomLinkVehicleNode::publishState(uint32_t mode_flags, bool is_armed)

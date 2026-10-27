@@ -478,6 +478,18 @@ Euler slots in `orientation_covariance[0:3]`. Angular velocity is derived from
 successive camera poses, and marked unavailable until two poses arrive.
 Camera API failure is logged and does not stop custom-link flight telemetry.
 
+## Motor RPM feedback
+
+`/fpv/motor_rpm` publishes `std_msgs/msg/Float32MultiArray` at 100 Hz from the
+firmware's **0x16** ESC telemetry stream. The FC converts bidirectional DShot
+eRPM (Bluejay-class ESCs) to mechanical RPM itself using its `motor_poles`
+setting, so the bridge passes values through unchanged: `data[i]` is motor `i`
+mechanical RPM and motors without the valid bit (bidir DShot off, or no eRPM
+frame yet) publish **NaN** — distinguish that from a true 0 RPM stop with
+`isnan`. Requires the custom-link firmware with `0x16` support; older firmware
+simply never publishes. `test/hw_custom_link_rpm_test.py` uses the same frames
+directly over serial for props-off OFFBOARD control-chain verification.
+
 ## GPS local odometry
 
 `/fpv/odom` publishes `nav_msgs/msg/Odometry` with sensor-data QoS (best effort),

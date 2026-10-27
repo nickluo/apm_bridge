@@ -1,5 +1,6 @@
 """Exercise the actual bridge with isolated ROS, fake FC TCP and a gimbal PTY."""
 
+import math
 import os
 from pathlib import Path
 import pty
@@ -17,7 +18,7 @@ from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy
 from rclpy.time import Time
 from geometry_msgs.msg import TwistStamped
 from mavros_msgs.msg import RCIn
-from std_msgs.msg import Bool, Header, Int8, String
+from std_msgs.msg import Bool, Float32MultiArray, Header, Int8, String
 
 from gimbal_pysim_test import build_reply, parse_ctrl
 from sitl_odometry_test import encode, shutdown
@@ -382,6 +383,70 @@ def test_actual_node_modes_and_los_subscription(tmp_path, monkeypatch):
         server.close()
         os.close(master)
         os.close(slave)
+        executor.shutdown()
+        node.destroy_node()
+        rclpy.shutdown(context=context)
+
+
+def test_esc_telemetry_publishes_motor_rpm(tmp_path, monkeypatch):
+    """0x16 PayloadEscTelemetry -> /fpv/motor_rpm: the FC already converts
+    eRPM to mechanical rpm, the bridge passes values through; motors without
+    the valid bit carry NaN."""
+    monkeypatch.setenv("ROS_DOMAIN_ID", str(160 + os.getpid() % 60))
+    binary = Path(os.environ.get("APM_BRIDGE_TEST_BINARY",
+                  Path(__file__).resolve().parents[3] / "build/apm_bridge/custom_link_bridge_node"))
+    assert binary.is_file(), f"Build the bridge first: {binary}"
+    server = socket.socket()
+    server.bind(("127.0.0.1", 0))
+    server.listen()
+    server.settimeout(5)
+    context = Context()
+    rclpy.init(context=context)
+    node = Node("esc_telemetry_test", context=context)
+    executor = SingleThreadedExecutor(context=context)
+    executor.add_node(node)
+    samples = []
+    node.create_subscription(Float32MultiArray, "/fpv/motor_rpm",
+                             lambda m: samples.append(list(m.data)), 10)
+    process = connection = None
+    log_path = tmp_path / "bridge.log"
+    try:
+        with log_path.open("w") as log:
+            process = subprocess.Popen([
+                str(binary), "--ros-args", "-p", "link.transport:=tcp",
+                "-p", f"link.tcp_port:={server.getsockname()[1]}",
+            ], stdout=log, stderr=subprocess.STDOUT)
+            connection = server.accept()[0]
+            connection.setblocking(False)
+
+            def pump(duration):
+                deadline = time.monotonic() + duration
+                while time.monotonic() < deadline:
+                    assert process.poll() is None, log_path.read_text()
+                    timestamp = round(time.monotonic() * 1e6) & 0xffffffff
+                    # 4 motors: 0..2 live rpm (20000/30000/10000), motor 3 invalid bit clear
+                    connection.sendall(encode(0x16, struct.pack(
+                        "<IBB8H", timestamp, 4, 0x07, 20000, 30000, 10000, 0, 0, 0, 0, 0)))
+                    try:
+                        connection.recv(4096)
+                    except BlockingIOError:
+                        pass
+                    executor.spin_once(timeout_sec=.005)
+                    time.sleep(.005)
+
+            pump(1.0)
+            assert samples, f"no /fpv/motor_rpm samples\n{log_path.read_text()}"
+            last = samples[-1]
+            assert len(last) == 4
+            assert last[0] == pytest.approx(20000.0, rel=1e-6)
+            assert last[1] == pytest.approx(30000.0, rel=1e-6)
+            assert last[2] == pytest.approx(10000.0, rel=1e-6)
+            assert math.isnan(last[3])  # invalid bit clear -> NaN, not 0
+    finally:
+        shutdown(process)
+        if connection is not None:
+            connection.close()
+        server.close()
         executor.shutdown()
         node.destroy_node()
         rclpy.shutdown(context=context)
