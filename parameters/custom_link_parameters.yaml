@@ -81,13 +81,21 @@ custom_link_bridge:
       tracking_filter_tau: 0.12 # seconds.
       los_timeout: 0.5 # seconds.
       # 云台机型: C20S (单轴) / C40D (卧式两轴) / C200T (三轴)，决定参与控制的轴。
-      # 行程限位默认沿用三轴机现场调参数值，手册正文未给数值 (在图纸)，
-      # 换机型后务必按图纸实测并用下列参数覆盖。
       model: "C20S"
-      # roll_min: -50.0    # deg
-      # roll_max: 50.0
-      pitch_min: -120.0
-      pitch_max: 120.0
+      # ---- 机械行程限位 (编码器/关节域, 抬头正; 由图纸实测) ----
+      # 仅作编码器角度门控与 AIM 目标钳制, 与姿态角保持值无关。
+      # roll_travel_min: -50.0    # deg
+      # roll_travel_max: 50.0
+      pitch_travel_min: -40.0
+      pitch_travel_max: 110.0
+      # yaw_travel_min: 0.0
+      # yaw_travel_max: 0.0
+      # ---- MISSION 相对机身俯仰窗口 (deg, 基准同 pitch_aim: FLU +Z 向上 = 90°) ----
+      # 跟踪中关节角限制在 [90+pitch_mission_min, 90+pitch_mission_max] 内,
+      # 超界只拦朝外方向 (允许回界)。默认不设 = 机械行程全范围; 须与机械行程相交。
+      # 例: min=-45/max=10 => 关节角 ∈ [45°, 100°] (上视为主, 略过顶)。
+      pitch_mission_min: -70.0
+      pitch_mission_max: 20.0
       # pitch_roll_speed_scale: 12.0
       # yaw_speed_scale: 10.0
       # ---- C-20S HORIZON 单轴俯仰逻辑 ----

@@ -385,7 +385,7 @@ def run_flight(client, node, output, args):
             raise RuntimeError("Bridge parameter service unavailable")
         future = parameters.get_parameters(["airsim.enabled", "link.transport", "gimbal_port", "gimbal.model",
                                              "gimbal.pitch_hold", "mass", "gravity_const",
-                                             "gimbal.pitch_aim", "gimbal.pitch_min", "gimbal.pitch_max"])
+                                             "gimbal.pitch_aim", "gimbal.pitch_travel_min", "gimbal.pitch_travel_max"])
         wait_until(future.done, node, 5, "Bridge parameter query timed out")
         result = future.result()
         if result is None or len(result.values) != 10:
@@ -397,7 +397,7 @@ def run_flight(client, node, output, args):
             raise RuntimeError("Running gimbal model/pitch_hold differs from the test")
         if not math.isclose(values[7].double_value, args.pitch_aim, abs_tol=1e-5):
             raise RuntimeError("Running pitch_aim differs from the test")
-        pitch_min, pitch_max = values[8].double_value, values[9].double_value
+        pitch_min, pitch_max = values[8].double_value, values[9].double_value  # 机械行程(编码器域)
         effective_aim = 90 + args.pitch_aim if pitch_min == pitch_max else float(np.clip(90 + args.pitch_aim, pitch_min, pitch_max))
         report["effective_aim_pitch_deg"] = effective_aim
         aim_rotation = Rotation.from_rotvec([0, -math.radians(effective_aim), 0])

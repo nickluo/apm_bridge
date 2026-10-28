@@ -156,6 +156,11 @@ struct GimbalConfig
 
     // AIM: camera +X aims toward body FLU +Z, with a nose-up pitch offset.
     float pitch_aim_deg = 0.0f;
+    // MISSION 相对机身俯仰窗口 (deg, 基准同 pitch_aim: FLU +Z(向上) = 90°):
+    // 跟踪时关节角限制在 [90+pitch_mission_min, 90+pitch_mission_max]。
+    // 默认 ±1000 = 不额外限制 (退化为机械行程); 窗口须与机械行程相交。
+    float pitch_mission_min_deg = -1000.0f;
+    float pitch_mission_max_deg = 1000.0f;
     // AIM 速率跟随环: 位置增益 (1/s), 与机身俯仰速率前馈 (增益 1) 配合,
     // 目标角误差 → LOCK+真实角速度指令。台架实测滞后 ~0.05s (角度环方案 ~0.15s)。
     float aim_follow_gain = 8.0f;
@@ -186,8 +191,8 @@ struct GimbalConfig
      * @brief 从 ROS 参数读取配置 (两段式: 先读 gimbal.model，再按机型默认值声明其余参数)
      *
      * 参数: gimbal.model ("C200T"|"C40D"|"C20S")，
-     *       gimbal.roll_min/roll_max, gimbal.pitch_min/pitch_max,
-     *       gimbal.yaw_min/yaw_max (deg),
+     *       gimbal.roll_travel_min/roll_travel_max, gimbal.pitch_travel_min/pitch_travel_max,
+     *       gimbal.yaw_travel_min/yaw_travel_max (deg, 机械行程/编码器域),
      *       gimbal.pitch_roll_speed_scale, gimbal.yaw_speed_scale,
      *       gimbal.send_uav_data,
      *       gimbal.pitch_aim, gimbal.aim_follow_gain, gimbal.pitch_hold, gimbal.roll_hold_enter, gimbal.roll_hold_exit,

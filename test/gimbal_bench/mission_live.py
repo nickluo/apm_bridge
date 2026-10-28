@@ -52,12 +52,9 @@ def main():
     rclpy.init()
     h = Harness()
     proc = subprocess.Popen([BINARY, "--ros-args",
+        "--params-file", "/home/nick/workspace/fpv_ws/src/apm_bridge/parameters/custom_link_parameters.yaml",
         "-p", "link.transport:=tcp", "-p", f"link.tcp_port:={port}",
         "-p", f"gimbal_port:={GIMBAL_PORT}",
-        "-p", "gimbal.model:=C20S", "-p", "gimbal.pitch_hold:=0.0",
-        "-p", "gimbal.pitch_aim:=-10.0", "-p", "gimbal.pitch_min:=-120.0",
-        "-p", "gimbal.pitch_max:=120.0", "-p", "gimbal.tracking_max_rate:=150.0",
-        "-p", "gimbal.tracking_max_accel:=600.0", "-p", "gimbal.los_timeout:=0.5",
         "-p", "baro_compensation:=false"],
         stdout=open(LOG, "w"), stderr=subprocess.STDOUT)
     conn = server.accept()[0]

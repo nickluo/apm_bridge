@@ -28,6 +28,19 @@ namespace
         require(selector.update(true, true, true, false, false, true) == GimbalMode::HORIZON, "OFF preempts mission");
         require(selector.update(true, true, true, false) == GimbalMode::HORIZON, "OFF latch persists");
         require(selector.update(false, false, true, false) == GimbalMode::AIM, "disarm resets");
+        // DISARM 从每个状态回 AIM (任务未复位时锁存, 复位后可重入)
+        selector.update(true, true, false, false); // 清除 disarm 时置位的任务锁存
+        require(selector.update(true, true, true, false) == GimbalMode::MISSION, "mission again");
+        require(selector.update(false, true, true, false) == GimbalMode::AIM, "disarm during MISSION -> AIM");
+        require(selector.update(true, true, true, false) == GimbalMode::AIM,
+                "re-arm with stale mission stays AIM (disarm reset persists)");
+        require(selector.update(true, true, false, false) == GimbalMode::AIM, "mission reset clears latch (AIM holds)");
+        require(selector.update(true, true, true, false) == GimbalMode::MISSION, "fresh mission resumes");
+        require(selector.update(true, true, false, false) == GimbalMode::HORIZON, "mission ends airborne -> HORIZON");
+        require(selector.update(false, true, false, true) == GimbalMode::AIM, "disarm from HORIZON -> AIM");
+        require(selector.update(true, true, false, true) == GimbalMode::AIM,
+                "re-armed manual stays AIM (no HORIZON regression)");
+        selector.update(false, false, true, false); // 恢复 disarm+mission 锁存, 供下条既有断言
         require(selector.update(true, false, true, false) == GimbalMode::AIM, "stale mission after rearm");
     }
 

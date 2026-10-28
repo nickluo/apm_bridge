@@ -5,6 +5,7 @@
 
 #include <array>
 #include <chrono>
+#include <filesystem>
 #include <cstdlib>
 #include <cmath>
 #include <cstring>
@@ -535,6 +536,71 @@ namespace
         std::cout << "PASS: serial FPV/LOCK angle transitions are slew-limited; stale feedback stops motion\n";
     }
 
+    void missionPitchWindow()
+    {
+        SerialGimbalSimulator simulator;
+        auto config = xfrobot::GimbalConfig::defaultsFor(xfrobot::GimbalModel::C20S);
+        config.pitch.min_deg = -120;
+        config.pitch.max_deg = 120;
+        config.pitch_mission_min_deg = -40; // 窗口 [50, 70] (FLU +Z 为 90°)
+        config.pitch_mission_max_deg = -20;
+        xfrobot::GimbalControl gimbal(simulator.pty.port, config);
+        gimbal.setMode(apm_bridge::GimbalMode::MISSION);
+        gimbal.start();
+        auto drive = [&](int milliseconds, double joint_deg, double los_pitch) {
+            simulator.reply.cam_angle[0] = 0;
+            simulator.reply.cam_angle[1] = static_cast<int16_t>(joint_deg * 100); // 机身水平: 姿态≈关节
+            simulator.reply.mtr_angle[0] = static_cast<int16_t>(-joint_deg * 100); // 编码器低头正
+            gimbal.updateTargetLos({true, los_pitch, 0, 0, 0});
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(milliseconds);
+            while (std::chrono::steady_clock::now() < deadline)
+            {
+                simulator.service();
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            }
+        };
+        drive(500, 60, 0.2);
+        require(simulator.control.gbc[1].op_value < 0, "window interior: LOS down drives pitch down");
+        drive(500, 50, 0.2);
+        require(simulator.control.gbc[1].op_value == 0, "lower mission bound blocks outward motion");
+        drive(500, 50, -0.2);
+        require(simulator.control.gbc[1].op_value > 0, "lower mission bound allows inward motion");
+        drive(500, 70, -0.2);
+        require(simulator.control.gbc[1].op_value == 0, "upper mission bound blocks outward motion");
+        gimbal.stop();
+        std::cout << "PASS: MISSION pitch window gates at 90+min/max, inward allowed\n";
+    }
+
+    void serialReconnect()
+    {
+        // 端口先缺失、后出现 (符号链接改指 pty 从端): 工作线程应每秒重试并自动连上
+        SerialGimbalSimulator simulator;
+        const auto link = std::filesystem::temp_directory_path() /
+            ("gimbal_reconnect_" + std::to_string(::getpid()));
+        std::error_code ec;
+        std::filesystem::remove(link, ec);
+        std::filesystem::create_symlink("/nonexistent_gimbal_port", link, ec);
+        require(!ec, "test symlink setup");
+        struct Guard { std::filesystem::path p; ~Guard() { std::error_code e; std::filesystem::remove(p, e); } } guard{link};
+        auto config = xfrobot::GimbalConfig::defaultsFor(xfrobot::GimbalModel::C20S);
+        xfrobot::GimbalControl gimbal(link.string(), config);
+        gimbal.run();
+        require(!gimbal.is_running(), "missing port leaves gimbal disconnected");
+        std::this_thread::sleep_for(std::chrono::milliseconds(1200));
+        std::filesystem::remove(link, ec);
+        std::filesystem::create_symlink(simulator.pty.port, link, ec);
+        bool connected = false;
+        for (int i = 0; i < 300 && !connected; ++i)
+        {
+            simulator.service();
+            connected = gimbal.is_running() && simulator.control.cmd.value == 4;
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        require(connected, "gimbal did not reconnect after the port appeared");
+        gimbal.stop();
+        std::cout << "PASS: serial port retry/reconnect\n";
+    }
+
     void hardwareBackend()
     {
         Pty pty;
@@ -828,7 +894,7 @@ namespace
         options.parameter_overrides({rclcpp::Parameter("airsim.enabled", true),
                                      rclcpp::Parameter("airsim.port", static_cast<int64_t>(server.port())),
                                      rclcpp::Parameter("gimbal.model", "C20S"),
-                                     rclcpp::Parameter("gimbal.pitch_max", 120.0),
+                                     rclcpp::Parameter("gimbal.pitch_travel_max", 120.0),
                                      rclcpp::Parameter("gimbal.pitch_aim", -10.0),
                                      rclcpp::Parameter("gimbal.tracking_max_rate", 140.0),
                                      rclcpp::Parameter("gimbal.tracking_max_accel", 600.0)});
@@ -928,7 +994,7 @@ namespace
                                      rclcpp::Parameter("airsim.port", static_cast<int64_t>(server.port())),
                                      rclcpp::Parameter("airsim.vehicle_name", "TestVehicle"),
                                      rclcpp::Parameter("gimbal.pitch_aim", 10.0),
-                                     rclcpp::Parameter("gimbal.pitch_max", 120.0),
+                                     rclcpp::Parameter("gimbal.pitch_travel_max", 120.0),
                                      rclcpp::Parameter("gimbal.pitch_hold", 12.0),
                                      rclcpp::Parameter("gimbal.tracking_max_rate", 140.0),
                                      rclcpp::Parameter("gimbal.tracking_max_accel", 600.0),
@@ -1017,7 +1083,7 @@ namespace
                                      rclcpp::Parameter("airsim.vehicle_name", "TestVehicle"),
                                      rclcpp::Parameter("gimbal.model", "C20S"),
                                      rclcpp::Parameter("gimbal.pitch_aim", 10.0),
-                                     rclcpp::Parameter("gimbal.pitch_max", 120.0),
+                                     rclcpp::Parameter("gimbal.pitch_travel_max", 120.0),
                                      rclcpp::Parameter("gimbal.pitch_hold", -7.0),
                                      rclcpp::Parameter("gimbal.tracking_max_rate", 140.0),
                                      rclcpp::Parameter("gimbal.tracking_max_accel", 600.0)});
@@ -1059,7 +1125,7 @@ namespace
                                          rclcpp::Parameter("airsim.vehicle_name", "TestVehicle"),
                                          rclcpp::Parameter("gimbal.model", "C20S"),
                                          rclcpp::Parameter("gimbal.pitch_aim", joint_pitch - 90),
-                                         rclcpp::Parameter("gimbal.pitch_max", 120.0)});
+                                         rclcpp::Parameter("gimbal.pitch_travel_max", 120.0)});
             auto mixed_node = std::make_shared<rclcpp::Node>("gimbal_c20s_reconstruction_test", options);
             mixed_node->declare_parameter<bool>("airsim.enabled", false);
             auto mixed_gimbal = apm_bridge::createGimbal(*mixed_node,
@@ -1166,6 +1232,8 @@ int main(int argc, char **argv)
             hardwarePose(model);
         hardwareBackend();
         serialAngleTransitions();
+        missionPitchWindow();
+        serialReconnect();
 #ifdef APM_BRIDGE_AIRSIM
         airsimTransitionRates();
 #endif

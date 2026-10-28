@@ -167,15 +167,19 @@ GimbalConfig GimbalConfig::fromParameters(rclcpp::Node &node)
         node.declare_parameter<double>(name, static_cast<double>(def));
         return static_cast<float>(node.get_parameter(name).as_double());
     };
-    cfg.roll.min_deg = param_f("gimbal.roll_min", cfg.roll.min_deg);
-    cfg.roll.max_deg = param_f("gimbal.roll_max", cfg.roll.max_deg);
-    cfg.pitch.min_deg = param_f("gimbal.pitch_min", cfg.pitch.min_deg);
-    cfg.pitch.max_deg = param_f("gimbal.pitch_max", cfg.pitch.max_deg);
-    cfg.yaw.min_deg = param_f("gimbal.yaw_min", cfg.yaw.min_deg);
-    cfg.yaw.max_deg = param_f("gimbal.yaw_max", cfg.yaw.max_deg);
+    // 机械行程限位: 编码器(关节)域, FRD 抬头正, 按图纸实测配置。
+    // 与姿态角/pitch_hold/pitch_aim 无关, 仅作为编码器角度门控与 AIM 目标钳制。
+    cfg.roll.min_deg = param_f("gimbal.roll_travel_min", cfg.roll.min_deg);
+    cfg.roll.max_deg = param_f("gimbal.roll_travel_max", cfg.roll.max_deg);
+    cfg.pitch.min_deg = param_f("gimbal.pitch_travel_min", cfg.pitch.min_deg);
+    cfg.pitch.max_deg = param_f("gimbal.pitch_travel_max", cfg.pitch.max_deg);
+    cfg.yaw.min_deg = param_f("gimbal.yaw_travel_min", cfg.yaw.min_deg);
+    cfg.yaw.max_deg = param_f("gimbal.yaw_travel_max", cfg.yaw.max_deg);
     cfg.pitch_roll_speed_scale = param_f("gimbal.pitch_roll_speed_scale", cfg.pitch_roll_speed_scale);
     cfg.yaw_speed_scale = param_f("gimbal.yaw_speed_scale", cfg.yaw_speed_scale);
     cfg.pitch_aim_deg = param_f("gimbal.pitch_aim", cfg.pitch_aim_deg);
+    cfg.pitch_mission_min_deg = param_f("gimbal.pitch_mission_min", cfg.pitch_mission_min_deg);
+    cfg.pitch_mission_max_deg = param_f("gimbal.pitch_mission_max", cfg.pitch_mission_max_deg);
     cfg.aim_follow_gain = param_f("gimbal.aim_follow_gain", cfg.aim_follow_gain);
     if (!std::isfinite(cfg.aim_follow_gain) || cfg.aim_follow_gain <= 0 || cfg.aim_follow_gain > 100)
         throw std::invalid_argument("Invalid gimbal AIM follow gain (0,100]");
@@ -197,6 +201,12 @@ GimbalConfig GimbalConfig::fromParameters(rclcpp::Node &node)
         if (!std::isfinite(axis.min_deg) || !std::isfinite(axis.max_deg) ||
             axis.min_deg > axis.max_deg)
             throw std::invalid_argument("Invalid gimbal mechanical limits");
+    if (!std::isfinite(cfg.pitch_mission_min_deg) || !std::isfinite(cfg.pitch_mission_max_deg) ||
+        cfg.pitch_mission_min_deg >= cfg.pitch_mission_max_deg)
+        throw std::invalid_argument("Invalid gimbal MISSION pitch window (min < max required)");
+    if (90.0 + cfg.pitch_mission_min_deg > cfg.pitch.max_deg ||
+        90.0 + cfg.pitch_mission_max_deg < cfg.pitch.min_deg)
+        throw std::invalid_argument("Gimbal MISSION pitch window does not intersect mechanical travel");
     cfg.aimTargetDegrees();
 
     node.declare_parameter<bool>("gimbal.send_uav_data", cfg.send_uav_data);
@@ -293,11 +303,9 @@ void GimbalControl::start()
     if (running.load())
         return;
     if (!open())
-    {
         RCLCPP_ERROR(node ? node->get_logger() : rclcpp::get_logger("xfrobot_gimbal"),
-                     "Failed to open gimbal serial port: %s", port_name.c_str());
-        return;
-    }
+                     "Gimbal serial port not available yet: %s (worker will keep retrying)",
+                     port_name.c_str());
     run();
     if (node)
     {
@@ -378,32 +386,68 @@ void GimbalControl::updateVehicleState(const sensor_msgs::msg::Imu &imu, double 
 
 void GimbalControl::run()
 {
-    if (!is_open || running.load())
+    if (running.load())
         return;
 
     running = true;
 
     work_thread = std::thread([&](){
+        // 连接(含断线重连)初始化: 丢弃旧缓冲、启动云台、复位轨迹与反馈状态。
+        // 打开失败 (设备未插/被占用/非串口设备) 由线程每秒重试, 不再一次性放弃。
+        auto establish_link = [&](bool first) {
+            try
+            {
+                serial_port.flushInput();
+            }
+            catch (const serial::IOException &)
+            {
+            }
+            catch (const serial::SerialException &)
+            {
+            }
+            start_stop(true);
+            control_stamp = std::chrono::steady_clock::now();
+            angle_trajectory_ready = false;
+            rx_state = SYNC1;
+            rx_index = 0;
+            {
+                std::lock_guard<std::mutex> lock(mtx);
+                last_status.rx_ok = false;
+                feedback_stamp = {};
+            }
+            RCLCPP_INFO(node ? node->get_logger() : rclcpp::get_logger("xfrobot_gimbal"),
+                        first ? "Gimbal connected on %s" : "Gimbal reconnected on %s",
+                        port_name.c_str());
+        };
 
-        // 丢弃上次会话遗留在内核缓冲中的旧应答，避免启动瞬间消化陈旧状态
-        try
-        {
-            serial_port.flushInput();
-        }
-        catch (const serial::IOException &e)
-        {
-        }
-
-        start_stop(true);
-        control_stamp = std::chrono::steady_clock::now();
-        angle_trajectory_ready = false;
-        {
-            std::lock_guard<std::mutex> lock(mtx);
-            last_status.rx_ok = false;
-            feedback_stamp = {};
-        }
+        bool was_open = false;
+        int open_failures = 0;
+        auto last_attempt = std::chrono::steady_clock::time_point{};
         while (running.load())
         {
+            if (!is_open)
+            {
+                const auto t = std::chrono::steady_clock::now();
+                if (t - last_attempt < std::chrono::seconds(1))
+                {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                    continue;
+                }
+                last_attempt = t;
+                if (!open())
+                {
+                    if (++open_failures == 1 || open_failures % 10 == 0)
+                        RCLCPP_ERROR(node ? node->get_logger() : rclcpp::get_logger("xfrobot_gimbal"),
+                                     "Gimbal serial open failed (%d attempts): %s - retrying every second",
+                                     open_failures, port_name.c_str());
+                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                    continue;
+                }
+                open_failures = 0;
+            }
+            if (is_open != was_open)
+                establish_link(!was_open);
+            was_open = is_open;
             const auto now = std::chrono::steady_clock::now();
             const double dt = std::clamp(std::chrono::duration<double>(now - control_stamp).count(), 1e-4, 0.1);
             control_stamp = now;
@@ -739,9 +783,15 @@ void GimbalControl::updateMissionControl(double dt)
         // 编码器低头正: 取反到抬头域, 与限位 (FRD 抬头正) 和速度符号同域比较,
         // 否则门控方向相反会把云台推进机械限位 (台架实测)。
         const double angle = -last_response.mtr_angle[encoder[i]] * 0.01;
+        // 俯仰用 MISSION 相对机身窗口 (FLU +Z 为 90°, 基准同 pitch_aim), 夹紧到机械行程;
+        // 滚转/偏航用机械行程。门控只拦朝界外方向, 允许回界内。
+        const double limit_lo = i == 1 ?
+            std::max(90.0 + cfg.pitch_mission_min_deg, (double)cfg.pitch.min_deg) : axes[i].min_deg;
+        const double limit_hi = i == 1 ?
+            std::min(90.0 + cfg.pitch_mission_max_deg, (double)cfg.pitch.max_deg) : axes[i].max_deg;
         if (!axes[i].present || protection ||
-            (axes[i].min_deg < axes[i].max_deg &&
-             ((angle <= axes[i].min_deg && speed < 0) || (angle >= axes[i].max_deg && speed > 0))))
+            (limit_lo < limit_hi &&
+             ((angle <= limit_lo && speed < 0) || (angle >= limit_hi && speed > 0))))
             speed = 0;
         speed = std::clamp(speed, -cfg.tracking.max_rate_dps, cfg.tracking.max_rate_dps);
         ctrl_op_type[i] = OP_TYPE_REAL_SPEED;
@@ -856,7 +906,10 @@ void GimbalControl::start_stop(bool start)
     {
         serial_port.write((uint8_t *)&packet, sizeof(packet));
     }
-    catch (const serial::IOException &e)
+    catch (const serial::IOException &)
+    {
+    }
+    catch (const serial::SerialException &)
     {
     }
 }
@@ -1071,7 +1124,10 @@ void GimbalControl::sendControlPacket()
     {
         serial_port.write((uint8_t *)&packet, sizeof(packet));
     }
-    catch (const serial::IOException &e)
+    catch (const serial::IOException &)
+    {
+    }
+    catch (const serial::SerialException &)
     {
     }
 }
@@ -1163,9 +1219,14 @@ bool GimbalControl::readPacket()
             } // end switch
         } // end while
     }
+    catch (const serial::IOException &e)
+    {
+        close(); // 发生严重错误，关闭串口 (由工作线程重连)
+        return false;
+    }
     catch (const serial::SerialException &e)
     {
-        close(); // 发生严重错误，关闭串口
+        close(); // 发生严重错误，关闭串口 (由工作线程重连)
         return false;
     }
     return false;

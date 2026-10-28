@@ -90,6 +90,9 @@ int main(int argc, char **argv)
 
     gimbal.setMode(apm_bridge::GimbalMode::HORIZON);
     gimbal.start();
+    // 串口由工作线程重试打开 (可能晚就绪), 最多等 3s
+    for (int i = 0; i < 150 && !gimbal.is_running(); ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
     if (!gimbal.is_running())
     {
         std::fprintf(stderr, "failed to open %s\n", port.c_str());
