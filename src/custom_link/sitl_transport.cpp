@@ -96,10 +96,34 @@ namespace custom_link
             RCLCPP_WARN_ONCE(self.logger_, "Ignored AirSim host frame 0x%02x; disable AirSim API control", frame.msgId);
             return;
         }
+        // Relay observability: forwarded-frame counters per type plus FC write
+        // failures, surfaced at 1 Hz. Localizes a stalled feeder (the plugin
+        // stops sending) vs an FC-side RX loss (counters rise, FC sees none).
+        switch (frame.msgId)
+        {
+        case 0x21: self.relayImu_++; break;
+        case 0x22: self.relayEnv_++; break;
+        default:   self.relayRc_++; break;
+        }
+        const uint64_t diagNow = monoClockUs();
+        if (diagNow - self.lastRelayDiagUs_ >= 1000000)
+        {
+            self.lastRelayDiagUs_ = diagNow;
+            RCLCPP_INFO(self.logger_, "AirSim relay: imu=%llu env=%llu rc=%llu fcWriteFail=%llu",
+                        static_cast<unsigned long long>(self.relayImu_),
+                        static_cast<unsigned long long>(self.relayEnv_),
+                        static_cast<unsigned long long>(self.relayRc_),
+                        static_cast<unsigned long long>(self.relayWriteFails_));
+        }
         std::array<uint8_t, protocol::kFrameMax> bytes{};
         const auto size = protocol::encode(frame.msgId, frame.seq, frame.payload.data(),
                                            frame.len, bytes.data(), bytes.size());
-        self.forwarding_ok_ = self.forwarding_ok_ && self.fc_.write(bytes.data(), size);
+        const bool ok = self.fc_.write(bytes.data(), size);
+        if (!ok)
+        {
+            self.relayWriteFails_++;
+        }
+        self.forwarding_ok_ = self.forwarding_ok_ && ok;
     }
 
     bool SitlTransport::servicePeer()

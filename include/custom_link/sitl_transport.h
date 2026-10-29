@@ -34,5 +34,12 @@ namespace custom_link
         int peer_ = -1;
         bool forwarding_ok_ = true;
         protocol::Parser parser_;
+        // Relay observability (forwardFrame runs on the reader thread; the
+        // counters are best-effort diagnostics, not synchronization data).
+        uint64_t relayImu_ = 0;
+        uint64_t relayEnv_ = 0;
+        uint64_t relayRc_ = 0;
+        uint64_t relayWriteFails_ = 0;
+        uint64_t lastRelayDiagUs_ = 0;
     };
 }
