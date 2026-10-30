@@ -21,6 +21,7 @@ _ARG_OVERRIDES = (
     ('gimbal_model', 'gimbal.model', str),
     ('pitch_hold', 'gimbal.pitch_hold', float),
     ('pitch_aim', 'gimbal.pitch_aim', float),
+    ('bind_rx', 'cli.bind_rx_on_connect', bool),
 )
 
 
@@ -119,6 +120,12 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'pitch_aim', default_value='',
             description='Optional AIM offset (deg, nose-up): body-relative target is 90 + pitch_aim, subject to limits; empty keeps YAML.'
+        ),
+        DeclareLaunchArgument(
+            'bind_rx', default_value='', choices=['', 'true', 'false'],
+            description='Override cli.bind_rx_on_connect: enter RX pairing mode on every '
+                        'link up. Keep false except during an actual pairing session '
+                        '(the RX stays in bind until a full power cycle); empty keeps YAML.'
         ),
         OpaqueFunction(function=_launch_node),
     ])

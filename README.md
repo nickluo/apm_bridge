@@ -488,7 +488,14 @@ mechanical RPM and motors without the valid bit (bidir DShot off, or no eRPM
 frame yet) publish **NaN** — distinguish that from a true 0 RPM stop with
 `isnan`. Requires the custom-link firmware with `0x16` support; older firmware
 simply never publishes. `test/hw_custom_link_rpm_test.py` uses the same frames
-directly over serial for props-off OFFBOARD control-chain verification.
+directly over serial for props-off OFFBOARD control-chain verification, while
+`test/hw_control_command_test.py` exercises the full ROS path (launches the
+bridge via `custom_link.launch.py`, arms through `/fpv/arm` +
+`/fpv/offboard`, drives `/fpv/control_command` collective-thrust/rate steps
+and checks the QuadX differential signs against `/fpv/motor_rpm`). Note that
+with the arm level held the 0x20 stream keeps OFFBOARD engaged, where the
+firmware bypasses motor stop: motors idle-spin from the moment arming
+succeeds until disarm.
 
 ## GPS local odometry
 
