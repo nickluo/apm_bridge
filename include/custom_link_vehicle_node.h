@@ -143,6 +143,7 @@ namespace custom_link_bridge
                         std::shared_ptr<quadrotor_msgs::srv::CliCommand::Response> response);
         apm_bridge::GimbalModeSelector gimbal_mode_selector;
         apm_bridge::GimbalMode gimbal_mode = apm_bridge::GimbalMode::AIM;
+        bool gimbal_homing = false; // 启动回中 (机械零点) 进行中: /fpv/gimbal_mode 发 "HOMING"
         std::atomic_bool gimbal_aim_requested{false}, gimbal_abort_requested{false};
         int64_t last_los_stamp = 0;
         int64_t last_los_clock = 0;

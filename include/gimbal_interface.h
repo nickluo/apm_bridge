@@ -24,6 +24,10 @@ namespace apm_bridge
         virtual void updateVehicleState(const sensor_msgs::msg::Imu &imu, double gravity) = 0;
         virtual void setMode(GimbalMode mode) = 0;
         virtual void updateTargetLos(const TargetLos &target) = 0;
+        // 启动回中 (机械零点) 是否已完成。默认 true: 无回中语义的后端 (捷联相机/
+        // AirSim) 始终视为就绪; 串口云台在 home_on_connect 首次连接回中完成前返回
+        // false, 期间驱动以 FPV+角度回零接管, 不接受模式控制律。
+        virtual bool homed() const { return true; }
     };
 
     // nullptr means intentionally disabled. Invalid configuration throws.

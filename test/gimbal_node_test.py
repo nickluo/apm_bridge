@@ -279,6 +279,8 @@ def test_actual_node_modes_and_los_subscription(tmp_path, monkeypatch):
                 "-p", f"gimbal_port:={os.ttyname(slave)}",
                 "-p", "gimbal.model:=C20S", "-p", "gimbal.pitch_hold:=12.0",
                 "-p", "gimbal.pitch_aim:=-55.0",
+                # 本用例考察模式选择器/LOS 语义, 关闭启动回中 (专用用例覆盖)
+                "-p", "gimbal.home_on_connect:=false",
                 "-p", "baro_compensation:=false",
             ], stdout=log, stderr=subprocess.STDOUT)
             connection = server.accept()[0]
@@ -376,6 +378,136 @@ def test_actual_node_modes_and_los_subscription(tmp_path, monkeypatch):
             trigger_pub.publish(Header(frame_id="ON"))
             wait_for(lambda: modes[-1] == "AIM")
             assert modes.count("MISSION") == 2
+    finally:
+        shutdown(process)
+        if connection is not None:
+            connection.close()
+        server.close()
+        os.close(master)
+        os.close(slave)
+        executor.shutdown()
+        node.destroy_node()
+        rclpy.shutdown(context=context)
+
+
+def test_home_on_connect_before_aim(tmp_path, monkeypatch):
+    """Startup homing: with gimbal.home_on_connect (default true) the node holds
+    the selector off ("HOMING" on /fpv/gimbal_mode), the driver sends exactly one
+    go_zero edge (pitch axis for C20S) and commands FPV + ANGLE 0 (encoder zero)
+    until the encoder reaches the tolerance; only then AIM takes over (LOCK rate
+    law)."""
+    monkeypatch.setenv("ROS_DOMAIN_ID", str(160 + os.getpid() % 60))
+    binary = Path(os.environ.get("APM_BRIDGE_TEST_BINARY",
+                  Path(__file__).resolve().parents[3] / "build/apm_bridge/custom_link_bridge_node"))
+    assert binary.is_file(), f"Build the bridge first: {binary}"
+    server = socket.socket()
+    server.bind(("127.0.0.1", 0))
+    server.listen()
+    server.settimeout(5)
+    master, slave = pty.openpty()
+    os.set_blocking(master, False)
+    context = Context()
+    rclpy.init(context=context)
+    node = Node("gimbal_home_test", context=context)
+    executor = SingleThreadedExecutor(context=context)
+    executor.add_node(node)
+    modes = []
+    node.create_subscription(String, "/fpv/gimbal_mode", lambda msg: modes.append(msg.data),
+                             QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
+    process = connection = None
+    buffer = bytearray()
+    controls = []
+    reply_mtrs = []  # 与 controls 逐包对齐: 该包应答的俯仰编码器值 (0.01deg)
+    start = time.monotonic()
+    homing_motion = [4500, 3500, 2500, 1500, 800, 300, 0]  # 编码器逐步回零 (0.01deg)
+    state = {"edge_seen": False, "motion_index": -1}
+    log_path = tmp_path / "bridge.log"
+    try:
+        with log_path.open("w") as log:
+            process = subprocess.Popen([
+                str(binary), "--ros-args", "-p", "link.transport:=tcp",
+                "-p", f"link.tcp_port:={server.getsockname()[1]}",
+                "-p", f"gimbal_port:={os.ttyname(slave)}",
+                "-p", "gimbal.model:=C20S", "-p", "gimbal.pitch_aim:=-55.0",
+                "-p", "gimbal.home_timeout_s:=4.0",
+                "-p", "baro_compensation:=false",
+            ], stdout=log, stderr=subprocess.STDOUT)
+            connection = server.accept()[0]
+            connection.setblocking(False)
+
+            def pump(duration):
+                deadline = time.monotonic() + duration
+                while time.monotonic() < deadline:
+                    assert process.poll() is None, log_path.read_text()
+                    timestamp = round((time.monotonic() - start) * 1e6) & 0xffffffff
+                    connection.sendall(encode(0x10, struct.pack("<I9h", timestamp, 0, 0, 0, 0, 0, 1000, 0, 0, 0)))
+                    connection.sendall(encode(0x12, struct.pack("<IHihBBiiiHHIH", timestamp, 24000, 0, 0, 0, 0,
+                                                                0, 0, 0, 0, 0, 0, 0)))
+                    try:
+                        connection.recv(4096)
+                    except BlockingIOError:
+                        pass
+                    try:
+                        buffer.extend(os.read(master, 4096))
+                    except BlockingIOError:
+                        pass
+                    while len(buffer) >= 40:
+                        if buffer[:2] != b"\xa9\x5b":
+                            del buffer[0]
+                            continue
+                        packet = parse_ctrl(bytes(buffer[:40]), time.monotonic() - start)
+                        del buffer[:40]
+                        controls.append(packet)
+                        if time.monotonic() - start < 1.0:
+                            continue  # 假云台"上电"延迟: 先不回包, 让 DDS 发现追上初始 HOMING 瞬态样本
+                        if packet.cmd == 4 and packet.go_zero & 2:
+                            state["edge_seen"] = True
+                        if state["edge_seen"] and state["motion_index"] + 1 < len(homing_motion):
+                            state["motion_index"] += 1
+                        reply_mtr = -homing_motion[max(state["motion_index"], 0)]
+                        reply_mtrs.append(reply_mtr)
+                        os.write(master, build_reply(cam0=0, mtr=(reply_mtr, 0, 0)))
+                    executor.spin_once(timeout_sec=.005)
+                    time.sleep(.005)
+
+            def wait_for(predicate):
+                deadline = time.monotonic() + 6
+                while not predicate():
+                    assert time.monotonic() < deadline, \
+                        f"modes={modes}\ncontrols={[(c.cmd, c.go_zero, c.op_value) for c in controls[-8:]]}\n{log_path.read_text()}"
+                    pump(.03)
+
+            # 1) 启动即 HOMING (transient-local 首帧), 回中边沿已发出
+            wait_for(lambda: modes and modes[0] == "HOMING")
+            wait_for(lambda: any(c.cmd == 4 and c.go_zero & 2 for c in controls))
+            # 2) 回中边沿前: 手动控制包全部为 FPV+角度 0 (编码器回零指令, fl_sens=15)
+            first_edge = next(i for i, c in enumerate(controls) if c.cmd == 4 and c.go_zero & 2)
+            for c in controls[:first_edge]:
+                if c.cmd == 4:
+                    assert c.wk_mode == [2, 2, 2] and c.op_type == [0, 0, 0] and c.op_value == [0, 0, 0], \
+                        f"homing control was not FPV+ANGLE+0: {c.wk_mode} {c.op_type} {c.op_value}"
+                    assert c.fl_sens == 15, f"FPV homing without fl_sens=15 crawls: {c.fl_sens}"
+            # 3) go_zero 恰好一次 0->1 边沿 (之后位保持, 不重触)
+            edges = sum(1 for i, c in enumerate(controls)
+                        if c.go_zero & 2 and (i == 0 or not controls[i - 1].go_zero & 2))
+            assert edges == 1, f"expected exactly one go_zero edge, saw {edges}"
+            # 4) 应答编码器仍在容差外 (|deg| > 2) 的控制包必然处于回中期: 全零速
+            for c, m in zip(controls, reply_mtrs):
+                if c.cmd == 4 and abs(m) * 0.01 > 2.0:
+                    assert c.op_value == [0, 0, 0], f"motion commanded while homing: {c.op_value}"
+            # 5) 编码器进容差后回中完成, 模式进入 AIM 且 AIM 速率律开始驱动
+            wait_for(lambda: "AIM" in modes)
+            assert modes.index("HOMING") < modes.index("AIM")
+            wait_for(lambda: any(c.cmd == 4 and c.op_value[1] > 0 for c in controls[-6:]))
+            assert "Gimbal homed to mechanical zero" in log_path.read_text()
+            assert "Gimbal homing timeout" not in log_path.read_text()
+            # 6) go_zero 为一次性脉冲 (~100ms 后清位, 保持边沿语义整洁),
+            #    之后不再出现任何新的置位
+            wait_for(lambda: len(controls) > 3 and not any(c.go_zero & 2 for c in controls[-3:]))
+            last_set = max(i for i, c in enumerate(controls) if c.go_zero & 2)
+            assert last_set < len(controls) - 1, "go_zero bit never cleared after the pulse"
+            assert not any(c.go_zero & 2 for c in controls[last_set + 1:]), \
+                "go_zero bit re-asserted after the pulse"
     finally:
         shutdown(process)
         if connection is not None:

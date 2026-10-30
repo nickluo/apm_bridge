@@ -180,6 +180,17 @@ struct GimbalConfig
     // 因此默认关闭，实机验证符号约定后再开启。
     bool send_uav_data = false;
 
+    // 启动回中 (机械零点): 首次连接成功后以 FPV+角度 op=0 (编码器零点, 台架实测
+    // mtr=-op 精确驱动, fl_sens=15) 主动把各轴编码器拉回机械零点; 各轴编码器进入
+    // home_tolerance_deg 容差 (或 home_timeout_s 超时放行) 后才算 homed, 此前不
+    // 接受模式控制律。go_zero 回中位在真机 C20S (fw38) 上无任何作用 (不回中、
+    // 不干扰命令), 边沿以 ~100ms 脉冲发送仅为其它机型兼容保留。每个对象生命周期
+    // 只回中一次 (重连不重复)。C++ 默认 false 保持 harness/工具语义; ROS 参数
+    // gimbal.home_on_connect 默认 true (节点启动先回零再 AIM)。
+    bool home_on_connect = false;
+    float home_timeout_s = 10.0f;     // 回中完成判定超时 (s)
+    float home_tolerance_deg = 2.0f;  // 各轴编码器近零容差 (deg)
+
     /**
      * @brief 按机型生成默认配置
      * @note 行程限位手册正文未给数值 (在图纸)，默认沿用三轴机的现场调参数值，
@@ -245,6 +256,8 @@ public:
     void updateTargetLos(const apm_bridge::TargetLos &target) override;
 
     bool is_running() const;
+    // home_on_connect 首次连接回中完成前为 false (期间锁定+零速)。
+    bool homed() const override { return homing_done.load(); }
 
     // Heading-relative camera FLU orientation; requires fresh vehicle attitude.
     sensor_msgs::msg::Imu::UniquePtr getOrientationFLU();
@@ -314,6 +327,7 @@ private:
     serial::Serial serial_port;
     bool is_open;
     std::atomic_bool running;
+    std::atomic_bool homing_done; // home_on_connect 回中完成标志 (未启用则构造即 true)
     GimbalConfig cfg;
     std::array<double, 3> aim_target_degrees;
     apm_bridge::GimbalTrackingController tracking_controller;

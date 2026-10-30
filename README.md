@@ -161,9 +161,19 @@ mode is published on `/fpv/gimbal_mode` (`std_msgs/msg/String`, transient-local)
 
 | Mode | Selection | Actuated camera behavior |
 | --- | --- | --- |
+| HOMING | First connection of the serial gimbal when `gimbal.home_on_connect` is true (default) | FPV + angle 0 (encoder zero = mechanical zero, bench-verified `mtr = -op`) with `fl_sens=15`; all axes are driven to encoder zero before any mode control runs. Ends when every present axis is within `gimbal.home_tolerance_deg` of zero or after `gimbal.home_timeout_s` (warning, mode control resumes). Once per node lifetime. |
 | AIM | Disarmed/startup, manual aiming before a mission, or a new tracker `ON` | Vendor command 4, FPV angle control; camera +X aims toward body ROS FLU +Z (up), offset by `pitch_aim`, within joint limits. |
 | MISSION | `/fpv/mission_state=true` and FC OFFBOARD authorized | Center LOS pitch/yaw at zero using external feedback + compensated rate feedforward; command 4, LOCK + REAL_SPEED, with mechanical limits. |
 | HORIZON | Mission exit, tracker `OFF`, API manual request, or pilot takeover while airborne | Keep heading aligned with the body and pitch at `pitch_hold` above horizontal. Stabilize roll on models that have a roll motor. |
+
+Startup order for the serial gimbal is **connect → HOMING (mechanical zero) → AIM**
+(the node's initial `/fpv/gimbal_mode` sample is already `HOMING`, published before
+the gimbal worker starts). Real-hardware note (C20S fw38, 2026-10-30): the vendor
+`go_zero` recenter bit is a no-op on this model — neither recenters nor interferes
+with commands — so homing actively drives FPV angle 0 instead; the `go_zero` edge
+is still emitted as a ~100 ms pulse for other models. The strapdown/AirSim backends
+have no homing semantics (`homed()` is always true) and keep the old
+startup-immediately-AIM behavior.
 
 HORIZON persists after takeover/exit until a new tracker `ON`, a new authorized
 mission, or disarming. A stale `mission_state=true` cannot resume an interrupted

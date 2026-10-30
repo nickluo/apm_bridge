@@ -115,16 +115,17 @@ def parse_ctrl(raw, t):
     return p
 
 
-def build_reply(gbc_stat=4, tca=1, inv=0, hw_err=0, cmd_value=4, cmd_stat=1, cam0=None):
+def build_reply(gbc_stat=4, tca=1, inv=0, hw_err=0, cmd_value=4, cmd_stat=1, cam0=None, mtr=None):
     cam_angle = list(CAM_ANGLE)
     if cam0 is not None:
         cam_angle[0] = cam0
+    mtr_angle = list(MTR_ANGLE if mtr is None else mtr)
     body = struct.pack(
         '<2sBBBB3h3h3h',
         b'\xB5\x9A', FW_VER, hw_err,
         (inv & 1) | ((gbc_stat & 0x07) << 1) | ((tca & 1) << 4),
         (cmd_stat & 0x07) | ((cmd_value & 0x1F) << 3),
-        *CAM_RATE, *cam_angle, *MTR_ANGLE)
+        *CAM_RATE, *cam_angle, *mtr_angle)
     crc = crc16(body)
     return body + struct.pack('>H', crc)
 

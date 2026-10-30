@@ -608,7 +608,9 @@ namespace
         rclcpp::NodeOptions options;
         options.parameter_overrides({rclcpp::Parameter("gimbal_port", pty.port),
                                      rclcpp::Parameter("gimbal.model", "C200T"),
-                                     rclcpp::Parameter("gimbal.send_uav_data", true)});
+                                     rclcpp::Parameter("gimbal.send_uav_data", true),
+                                     // 本用例考察融合/位姿/生命周期, 关闭启动回中 (专用用例覆盖)
+                                     rclcpp::Parameter("gimbal.home_on_connect", false)});
         auto node = std::make_shared<rclcpp::Node>("gimbal_hardware_interface_test", options);
         node->declare_parameter<bool>("airsim.enabled", false);
         std::unique_ptr<apm_bridge::Gimbal> gimbal = apm_bridge::createGimbal(
@@ -769,6 +771,112 @@ namespace
         require(capture.count() > stopped_count, "hardware backend did not restart");
         gimbal->stop();
         std::cout << "PASS: Gimbal hardware lifecycle, ENU pose, legacy fields and FRD/NEU fusion\n";
+    }
+
+    // 启动回中 (home_on_connect): 首次连接 go_zero 恰好一次边沿, 回中期全轴
+    // FPV+角度 op=0 (编码器零点, 模式控制律不介入), 编码器进容差或超时后恢复
+    // 模式控制 (LOCK 域)。
+    void homeOnConnect()
+    {
+        // pty 假云台: 每收到一包手动控制立即回一包反馈; pitch 编码器由
+        // edge_seen/encoder 控制, 其余字段与 SerialGimbalSimulator 相同。
+        for (int variant = 0; variant < 2; ++variant)
+        {
+            const bool timeout_path = variant == 1;
+            Pty pty;
+            auto config = xfrobot::GimbalConfig::defaultsFor(xfrobot::GimbalModel::C20S);
+            config.home_on_connect = true;
+            config.home_timeout_s = timeout_path ? 0.5f : 5.0f;
+            xfrobot::GimbalControl gimbal(pty.port, config);
+            gimbal.setMode(apm_bridge::GimbalMode::AIM); // 回中完成前必须被忽略
+            gimbal.start();
+            std::vector<uint8_t> buffer;
+            xfrobot::Gcu2GbcPkt_t latest{};
+            int edges = 0;
+            bool previous_bit = false;
+            bool non_homing_cmd_while_pending = false;
+            int16_t encoder = 4500; // 俯仰编码器 45°, 远离零点容差 2°
+            auto service = [&]()
+            {
+                std::array<uint8_t, 4096> input{};
+                const auto count = ::read(pty.fd, input.data(), input.size());
+                if (count > 0)
+                    buffer.insert(buffer.end(), input.begin(), input.begin() + count);
+                while (buffer.size() >= sizeof(xfrobot::Gcu2GbcPkt_t))
+                {
+                    if (buffer[0] != 0xA9 || buffer[1] != 0x5B)
+                    {
+                        buffer.erase(buffer.begin());
+                        continue;
+                    }
+                    xfrobot::Gcu2GbcPkt_t packet;
+                    std::memcpy(&packet, buffer.data(), sizeof(packet));
+                    buffer.erase(buffer.begin(), buffer.begin() + sizeof(packet));
+                    if (packet.cmd.value == 4)
+                    {
+                        latest = packet;
+                        if (!gimbal.homed())
+                            for (const auto &axis : packet.gbc)
+                                if (axis.wk_mode != 2 || axis.op_type != 0 || axis.op_value != 0)
+                                    non_homing_cmd_while_pending = true;
+                        const bool bit = packet.gbc[1].go_zero;
+                        if (bit && !previous_bit)
+                        {
+                            ++edges;
+                            if (!timeout_path) // 成功路径: 边沿后编码器逐步回零
+                                encoder = 0;
+                        }
+                        previous_bit = bit;
+                    }
+                    xfrobot::Gbc2GcuPkt_t reply{};
+                    reply.sync[0] = 0xB5;
+                    reply.sync[1] = 0x9A;
+                    reply.gbc_stat = 4;
+                    reply.cmd.value = 4;
+                    reply.cmd.stat = 1;
+                    reply.mtr_angle[0] = encoder;
+                    const auto checksum = crc16(reinterpret_cast<const uint8_t *>(&reply), 24);
+                    reply.crc[0] = checksum >> 8;
+                    reply.crc[1] = checksum & 0xff;
+                    require(::write(pty.fd, &reply, sizeof(reply)) == sizeof(reply), "homing feedback write");
+                }
+            };
+            auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(6);
+            while (std::chrono::steady_clock::now() < deadline && !gimbal.homed())
+            {
+                service();
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            }
+            require(gimbal.homed(), timeout_path ? "homing timeout did not release mode control"
+                                                 : "gimbal did not home to the mechanical zero");
+            require(edges == 1, "go_zero edge was not issued exactly once");
+            require(!non_homing_cmd_while_pending, "homing packets were not pure FPV+ANGLE+0");
+            service();
+            // go_zero 以 ~100ms 脉冲发送后清位 (保持边沿语义整洁):
+            // 再驱动 300ms, 之后的所有包都不应再带该位
+            const auto pulse_deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(300);
+            while (std::chrono::steady_clock::now() < pulse_deadline)
+            {
+                service();
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            }
+            service();
+            require(!previous_bit, "go_zero bit did not clear after the homing pulse");
+            // 回中结束后模式控制恢复: AIM 速率律开始驱动 (编码器 0°, 目标 +40°)
+            deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+            while (std::chrono::steady_clock::now() < deadline &&
+                   !(latest.cmd.value == 4 && latest.gbc[1].op_type == 2 && latest.gbc[1].op_value > 0))
+            {
+                service();
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            }
+            require(latest.gbc[1].op_type == 2 && latest.gbc[1].op_value > 0,
+                    "AIM rate law did not resume after homing");
+            require(latest.gbc[0].op_value == 0 && latest.gbc[2].op_value == 0,
+                    "absent axes moved after homing");
+            gimbal.stop();
+        }
+        std::cout << "PASS: home_on_connect go_zero edge, FPV homing, tolerance and timeout release\n";
     }
 
 #ifdef APM_BRIDGE_AIRSIM
@@ -1231,6 +1339,7 @@ int main(int argc, char **argv)
         for (const auto model : {xfrobot::GimbalModel::C20S, xfrobot::GimbalModel::C40D, xfrobot::GimbalModel::C200T})
             hardwarePose(model);
         hardwareBackend();
+        homeOnConnect();
         serialAngleTransitions();
         missionPitchWindow();
         serialReconnect();

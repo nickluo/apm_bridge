@@ -9,6 +9,9 @@
 | `probe_rate_fpv_domain.py` | 真实角速度 ±30°/s + FPV+角度 ±20°：速率命令域、FPV 相对角域 |
 | `probe_direction_ab.py` | A/B 两段 ±30° 摆动：肉眼判别 cam+/op+ 的绝对抬头/低头方向 |
 | `probe_manual_log.py <out.tsv>` | 60s 全遥测 50Hz 记录器：手动滚转/偏航激励后离线判符号 |
+| `probe_go_zero.py` | go_zero 回中位行为（实测 C20S fw38: 完全无效，不回中不干扰） |
+| `probe_fpv_to_lock.py` | FPV+角度0(fl_sens=15)→LOCK+速率 转换：回中原语与模式切换连续性 |
+| `probe_aim_after_home.py` | 复刻节点 home_on_connect+AIM 速率律：回中后 AIM 收敛性 |
 
 用法示例：
 ```

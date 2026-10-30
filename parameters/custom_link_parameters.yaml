@@ -70,6 +70,13 @@ custom_link_bridge:
 
     gimbal:
       mission_on_ground: true # 在地面时是否允许执行任务
+      # ---- 启动回中 (机械零点) ----
+      # 首次连接成功后先触发 go_zero 回中 (锁定+零速等待固件动作), 各轴编码器
+      # 进入 home_tolerance_deg 容差或 home_timeout_s 超时后才进入 AIM 等模式;
+      # /fpv/gimbal_mode 期间发布 "HOMING"。每个节点生命周期只回中一次。
+      home_on_connect: true
+      # home_timeout_s: 10.0     # 回中完成判定超时 (s), 超时放行并告警
+      # home_tolerance_deg: 2.0  # 各轴编码器近零容差 (deg)
       # 共用俯仰角 (deg)：捷联仍为机身固定角 (FLU 正值低头)。
       # 真机/AirSim 增稳云台正值抬头，仅 HORIZON 使用；MISSION 以画面中心为目标。
       pitch_hold: 0.0

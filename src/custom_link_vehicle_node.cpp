@@ -213,9 +213,21 @@ CustomLinkVehicleNode::CustomLinkVehicleNode()
     gimbal = apm_bridge::createGimbal(*this, [publisher = gimbal_imu_pub](auto msg) {
         publisher->publish(std::move(msg));
     });
+    // 初始模式在 gimbal->start() 之前发布, 确保排在回中完成之前: 回中极快
+    // (云台已在零点) 时首帧也必须是 "HOMING" -> "AIM", 而不是直接 "AIM"。
+    gimbal_homing = gimbal && !gimbal->homed();
+    {
+        std_msgs::msg::String initial_mode;
+        initial_mode.data = gimbal_homing ? "HOMING" : "AIM";
+        gimbal_mode_pub->publish(initial_mode);
+    }
     if (gimbal)
     {
-        gimbal->setMode(apm_bridge::GimbalMode::AIM);
+        // 启动即连云台: home_on_connect 后端 (串口云台) 先回中机械零点,
+        // homed() 置位后才由 updateGimbalMode 进 AIM; 无回中语义的后端
+        // (捷联/AirSim) homed() 恒真, 维持启动即 AIM。
+        if (gimbal->homed())
+            gimbal->setMode(apm_bridge::GimbalMode::AIM);
         gimbal->start();
     }
     if (!this->has_parameter("gimbal.los_timeout"))
@@ -285,9 +297,6 @@ CustomLinkVehicleNode::CustomLinkVehicleNode()
                 }
             }
         });
-    std_msgs::msg::String initial_mode;
-    initial_mode.data = "AIM";
-    gimbal_mode_pub->publish(initial_mode);
     gimbal_mode_timer = this->create_wall_timer(20ms, [this]() { updateGimbalMode(); });
 
     // ---------------- 链路 ----------------
@@ -978,12 +987,33 @@ void CustomLinkVehicleNode::pushControl()
 
 void CustomLinkVehicleNode::updateGimbalMode()
 {
+    // 启动回中 (机械零点) 未完成: 云台由驱动回中状态机接管 (FPV+角度回零),
+    // 模式选择器暂不介入; 期间到达的 AIM/中止边沿直接消费掉, 回中结束后
+    // 由选择器按当前状态 (未解锁即 AIM) 重新决策, 不重放旧请求。
+    if (gimbal && !gimbal->homed())
+    {
+        gimbal_aim_requested = false;
+        gimbal_abort_requested = false;
+        if (!gimbal_homing)
+        {
+            gimbal_homing = true;
+            std_msgs::msg::String msg;
+            msg.data = "HOMING";
+            gimbal_mode_pub->publish(msg);
+            RCLCPP_INFO(this->get_logger(), "Gimbal mode -> HOMING (returning to mechanical zero)");
+        }
+        return;
+    }
+    const bool left_homing = gimbal_homing;
+    gimbal_homing = false;
     const auto next = gimbal_mode_selector.update(armed.load(),
         landed_state.load() == mavros_msgs::msg::ExtendedState::LANDED_STATE_IN_AIR ||
             (mission_gimbal_on_ground && in_mission.load()),
         in_mission.load(), rc_manual.load(),
         gimbal_aim_requested.exchange(false), gimbal_abort_requested.exchange(false));
-    if (next == gimbal_mode)
+    // 回中刚结束也强制发布一次: gimbal_mode 可能未变 (AIM), 但对外状态
+    // 需要从 "HOMING" 切换到实际模式并让驱动真正进入该模式。
+    if (next == gimbal_mode && !left_homing)
         return;
     gimbal_mode = next;
     if (gimbal)

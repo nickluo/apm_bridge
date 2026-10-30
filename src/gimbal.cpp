@@ -186,6 +186,12 @@ GimbalConfig GimbalConfig::fromParameters(rclcpp::Node &node)
     cfg.pitch_hold_deg = param_f("gimbal.pitch_hold", cfg.pitch_hold_deg);
     cfg.roll_hold_enter_deg = param_f("gimbal.roll_hold_enter", cfg.roll_hold_enter_deg);
     cfg.roll_hold_exit_deg = param_f("gimbal.roll_hold_exit", cfg.roll_hold_exit_deg);
+    // 启动回中 (机械零点): 节点默认开 (启动后先回零再进 AIM); harness/工具用
+    // C++ 默认构造 (false) 保持原语义。详见 GimbalConfig 注释。
+    node.declare_parameter<bool>("gimbal.home_on_connect", true);
+    node.get_parameter("gimbal.home_on_connect", cfg.home_on_connect);
+    cfg.home_timeout_s = param_f("gimbal.home_timeout_s", cfg.home_timeout_s);
+    cfg.home_tolerance_deg = param_f("gimbal.home_tolerance_deg", cfg.home_tolerance_deg);
     cfg.tracking.gain = param_f("gimbal.tracking_gain", cfg.tracking.gain);
     cfg.tracking.rate_feedforward = param_f("gimbal.tracking_rate_feedforward", cfg.tracking.rate_feedforward);
     cfg.tracking.max_rate_dps = param_f("gimbal.tracking_max_rate", cfg.tracking.max_rate_dps);
@@ -197,6 +203,9 @@ GimbalConfig GimbalConfig::fromParameters(rclcpp::Node &node)
         !std::isfinite(cfg.roll_hold_enter_deg) || !std::isfinite(cfg.roll_hold_exit_deg) ||
         cfg.roll_hold_exit_deg < 0 || cfg.roll_hold_enter_deg < cfg.roll_hold_exit_deg)
         throw std::invalid_argument("Invalid gimbal pitch hold or roll protection thresholds");
+    if (!std::isfinite(cfg.home_timeout_s) || cfg.home_timeout_s <= 0 || cfg.home_timeout_s > 300 ||
+        !std::isfinite(cfg.home_tolerance_deg) || cfg.home_tolerance_deg < 0 || cfg.home_tolerance_deg > 45)
+        throw std::invalid_argument("Invalid gimbal homing timeout (0,300] s or tolerance [0,45] deg");
     for (const auto &axis : {cfg.roll, cfg.pitch, cfg.yaw})
         if (!std::isfinite(axis.min_deg) || !std::isfinite(axis.max_deg) ||
             axis.min_deg > axis.max_deg)
@@ -221,7 +230,8 @@ GimbalControl::GimbalControl(const std::string &port)
 }
 
 GimbalControl::GimbalControl(const std::string &port, const GimbalConfig &gimbal_cfg)
-    : port_name(port), is_open(false), running(false), cfg(gimbal_cfg),
+    : port_name(port), is_open(false), running(false),
+      homing_done(!gimbal_cfg.home_on_connect), cfg(gimbal_cfg),
       aim_target_degrees(cfg.aimTargetDegrees()), tracking_controller(cfg.tracking),
       angle_trajectory(cfg.tracking), cmd_trig_counter(0)
 {
@@ -394,6 +404,10 @@ void GimbalControl::run()
     work_thread = std::thread([&](){
         // 连接(含断线重连)初始化: 丢弃旧缓冲、启动云台、复位轨迹与反馈状态。
         // 打开失败 (设备未插/被占用/非串口设备) 由线程每秒重试, 不再一次性放弃。
+        bool homing_edge_sent = false; // 本次连接是否已发出 go_zero 边沿 (工作线程局部)
+        std::chrono::steady_clock::time_point homing_deadline{};
+        bool go_zero_pulse_active = false;           // 边沿脉冲发送中 (发送后须清位)
+        std::chrono::steady_clock::time_point go_zero_pulse_until{};
         auto establish_link = [&](bool first) {
             try
             {
@@ -410,10 +424,24 @@ void GimbalControl::run()
             angle_trajectory_ready = false;
             rx_state = SYNC1;
             rx_index = 0;
+            homing_edge_sent = false;
+            go_zero_pulse_active = false;
             {
                 std::lock_guard<std::mutex> lock(mtx);
                 last_status.rx_ok = false;
                 feedback_stamp = {};
+            }
+            if (!homing_done.load())
+            {
+                // 回中未完成时 (重)连接: 清 go_zero 位, 保证下一反馈包
+                // 重新产生干净的 0->1 边沿触发回中; 同时从连接时刻起算完成
+                // 超时——若云台从不回包或回中途中静默, 循环顶的超时判定也能
+                // 放行模式控制, 不会永久卡在 HOMING
+                std::lock_guard<std::mutex> lock(cmd_mtx);
+                go_zero_bits = 0;
+                homing_deadline = std::chrono::steady_clock::now() +
+                    std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                        std::chrono::duration<double>(cfg.home_timeout_s));
             }
             RCLCPP_INFO(node ? node->get_logger() : rclcpp::get_logger("xfrobot_gimbal"),
                         first ? "Gimbal connected on %s" : "Gimbal reconnected on %s",
@@ -471,7 +499,23 @@ void GimbalControl::run()
             // 相对角 (90+pitch_aim); 不使用云台 FPV 跟随/uav 融合 (固件无 uav 数据时
             // 不随机身转动, 且约定 send_uav_data 恒 false)。滚转/偏航轴锁定当前姿态。
             ctrl_wk_mode = WK_MODE_LOCK;
-            if (control_mode == apm_bridge::GimbalMode::AIM)
+            const bool homing = !homing_done.load();
+            if (homing)
+            {
+                // 启动回中: FPV+角度 op=0 主动把各轴编码器拉回机械零点。台架实测
+                // (2026-10-26/30): FPV 相对角零点=编码器零点, mtr=-op 精确驱动,
+                // 且需 fl_sens=15 才有有效角度跟踪 (sendControlPacket 按 FPV 自动置);
+                // 固件 go_zero 回中位在真机 C20S (fw38) 上为无效操作
+                // (test/gimbal_bench/probe_go_zero.py), 边沿仅作其它机型的兼容保留。
+                // 模式控制律一律不介入 (完成判定见下方反馈包处理)。
+                ctrl_wk_mode = WK_MODE_FPV;
+                for (int i = 0; i < 3; ++i)
+                {
+                    ctrl_op_type[i] = OP_TYPE_ANGLE;
+                    ctrl_op_value[i] = 0;
+                }
+            }
+            else if (control_mode == apm_bridge::GimbalMode::AIM)
             {
                 double body_rate_ff = 0;
                 bool feedback_fresh = false;
@@ -505,11 +549,71 @@ void GimbalControl::run()
                     speed = 0; // 反馈过期: 锁定当前姿态
                 ctrl_op_value[1] = static_cast<int16_t>(std::round(speed * 10.0));
             }
+            // go_zero 边沿脉冲 (~100ms) 发完即清位: 协议语义为位变化触发,
+            // 脉冲化避免长期占用该位 (真机实测该位无副作用)
+            if (go_zero_pulse_active && now >= go_zero_pulse_until)
+            {
+                go_zero_pulse_active = false;
+                std::lock_guard<std::mutex> lock(cmd_mtx);
+                go_zero_bits = 0;
+            }
+            // 回中超时在循环顶判定 (不依赖反馈包到达): 云台从不回包或回中途中
+            // 静默时同样放行模式控制, 避免永久卡在 HOMING
+            if (!homing_done.load() && now > homing_deadline)
+            {
+                homing_done = true;
+                RCLCPP_WARN(node ? node->get_logger() : rclcpp::get_logger("xfrobot_gimbal"),
+                            "Gimbal homing timeout after %.1f s; resuming mode control anyway",
+                            cfg.home_timeout_s);
+            }
             // 尝试读取返回包
             if (readPacket())
             {
+                // ---- 启动回中: 本次连接的首个反馈包产生 go_zero 0->1 边沿 ----
+                // (establish_link 已清位。真机 C20S fw38 实测 (2026-10-30,
+                // probe_go_zero.py): go_zero 位既不触发回中动作, 也不影响控制命令;
+                // 边沿仅为其它机型/固件兼容保留, 以 ~100ms 脉冲发出后清位保持语义整洁)
+                if (!homing_done.load() && !homing_edge_sent)
+                {
+                    homing_edge_sent = true;
+                    go_zero_pulse_active = true;
+                    go_zero_pulse_until = now + std::chrono::milliseconds(100);
+                    uint8_t mask = 0;
+                    if (cfg.roll.present)
+                        mask |= 1u << 0;
+                    if (cfg.pitch.present)
+                        mask |= 1u << 1;
+                    if (cfg.yaw.present)
+                        mask |= 1u << 2;
+                    {
+                        std::lock_guard<std::mutex> lock(cmd_mtx);
+                        go_zero_bits = mask;
+                    }
+                    RCLCPP_INFO(node ? node->get_logger() : rclcpp::get_logger("xfrobot_gimbal"),
+                                "Gimbal homing: go_zero axes 0x%X, tolerance %.1f deg, timeout %.1f s",
+                                mask, cfg.home_tolerance_deg, cfg.home_timeout_s);
+                }
+                // ---- 回中完成判定: 全部在轴编码器进入零点容差 (超时在循环顶) ----
+                if (!homing_done.load() && homing_edge_sent)
+                {
+                    const double tol = cfg.home_tolerance_deg;
+                    const bool at_zero =
+                        (!cfg.roll.present || std::abs(last_response.mtr_angle[1] * 0.01) <= tol) &&
+                        (!cfg.pitch.present || std::abs(last_response.mtr_angle[0] * 0.01) <= tol) &&
+                        (!cfg.yaw.present || std::abs(last_response.mtr_angle[2] * 0.01) <= tol);
+                    if (at_zero)
+                    {
+                        homing_done = true;
+                        RCLCPP_INFO(node ? node->get_logger() : rclcpp::get_logger("xfrobot_gimbal"),
+                                    "Gimbal homed to mechanical zero; mode control enabled");
+                    }
+                }
                 // ---- 控制律 (按机型门控; C-40D/C-200T 与原实现逐字节一致) ----
-                if (control_mode == apm_bridge::GimbalMode::MISSION)
+                if (homing)
+                {
+                    // 回中期间保持循环顶的 FPV+角度0 回零命令, 不运行模式控制律
+                }
+                else if (control_mode == apm_bridge::GimbalMode::MISSION)
                     updateMissionControl(dt);
                 else if (control_mode == apm_bridge::GimbalMode::AIM)
                 {
@@ -624,7 +728,10 @@ void GimbalControl::run()
                         ctrl_op_value[i] = static_cast<int16_t>(speed_gbc[i] * 10.0f);
                     }
                 }
-                smoothAngleCommands(dt, true);
+                // 回中命令是 FPV 编码器域 (mtr=-op), 与 smoothAngleCommands 的
+                // LOCK 相机姿态角域不同, 不得混入轨迹平滑 (会以错误域改写 op)
+                if (!homing)
+                    smoothAngleCommands(dt, true);
                 sendControlPacket();
 
                 {
@@ -658,10 +765,11 @@ void GimbalControl::run()
             }
             else
             {
-                if (control_mode == apm_bridge::GimbalMode::MISSION)
+                if (!homing && control_mode == apm_bridge::GimbalMode::MISSION)
                     updateMissionControl(dt);
                 // Angle trajectories must not advance without fresh encoder feedback.
-                smoothAngleCommands(dt, false);
+                if (!homing)
+                    smoothAngleCommands(dt, false);
                 sendControlPacket();
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
