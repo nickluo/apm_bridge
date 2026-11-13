@@ -157,8 +157,10 @@ tf2::Quaternion GimbalConfig::constrainMissionOrientation(const tf2::Quaternion 
 {
     // Physical joint order matches the vendor pose: yaw * roll * pitch.
     // Unlike ZYX, ZXY has no pitch singularity at the new body-Z AIM reference.
+    // 安装旋转: 期望/输出均为机身系相机姿态; 分解前先除掉 mount, 重建时再
+    // 乘回 (恒等安装时与原实现逐位一致)。
     const auto desired = relative.normalized();
-    const tf2::Matrix3x3 matrix(desired);
+    const tf2::Matrix3x3 matrix((mount.inverse() * desired).normalized());
     const double r = std::asin(std::clamp(matrix[2][1], -1.0, 1.0));
     const bool singular = std::abs(std::cos(r)) < 1e-6;
     const double p = singular ? 0.0 : std::atan2(-matrix[2][0], matrix[2][2]);
@@ -173,7 +175,7 @@ tf2::Quaternion GimbalConfig::constrainMissionOrientation(const tf2::Quaternion 
         const double pitch_hi = mission_window ? missionJointMaxDeg() : pitch.max_deg;
         const double pitch_joint = pitch.present ?
             std::clamp(-pitch_angle * deg, pitch_lo, pitch_hi) : 0.0;
-        return apm_bridge::gimbalCameraToWorld(tf2::Quaternion(0, 0, 0, 1),
+        return apm_bridge::gimbalCameraToWorld(mount,
             {roll.constrainDegrees(roll_angle * deg) / deg, pitch_joint / deg,
              yaw.constrainDegrees(-yaw_angle * deg) / deg}, {roll.present, pitch.present, yaw.present});
     };
@@ -249,6 +251,42 @@ GimbalConfig GimbalConfig::fromParameters(rclcpp::Node &node)
 
     node.declare_parameter<bool>("gimbal.send_uav_data", cfg.send_uav_data);
     node.get_parameter("gimbal.send_uav_data", cfg.send_uav_data);
+
+    // ---- 基座安装旋转 (行主序 3x3, 默认单位阵) ----
+    node.declare_parameter<std::vector<double>>(
+        "gimbal.mount_rotation", std::vector<double>{1, 0, 0, 0, 1, 0, 0, 0, 1});
+    const auto mount_rows = node.get_parameter("gimbal.mount_rotation").as_double_array();
+    if (mount_rows.size() != 9)
+        throw std::invalid_argument("gimbal.mount_rotation must be a 9-element row-major 3x3 matrix");
+    for (double v : mount_rows)
+        if (!std::isfinite(v))
+            throw std::invalid_argument("gimbal.mount_rotation contains non-finite values");
+    {
+        const double r0 = mount_rows[0], r1 = mount_rows[1], r2 = mount_rows[2];
+        const double r3 = mount_rows[3], r4 = mount_rows[4], r5 = mount_rows[5];
+        const double r6 = mount_rows[6], r7 = mount_rows[7], r8 = mount_rows[8];
+        // 正交性 R·R^T = I 与右手性 det(R) = +1 (容差 1e-3), 拒绝投影/缩放/反射
+        const double grams[3][3] = {
+            {r0 * r0 + r1 * r1 + r2 * r2, r0 * r3 + r1 * r4 + r2 * r5, r0 * r6 + r1 * r7 + r2 * r8},
+            {r3 * r0 + r4 * r1 + r5 * r2, r3 * r3 + r4 * r4 + r5 * r5, r3 * r6 + r4 * r7 + r5 * r8},
+            {r6 * r0 + r7 * r1 + r8 * r2, r6 * r3 + r7 * r4 + r8 * r5, r6 * r6 + r7 * r7 + r8 * r8}};
+        for (int i = 0; i < 3; ++i)
+            for (int j = 0; j < 3; ++j)
+            {
+                const double expect = (i == j) ? 1.0 : 0.0;
+                if (std::abs(grams[i][j] - expect) > 1e-3)
+                    throw std::invalid_argument(
+                        "gimbal.mount_rotation is not orthonormal (R*R^T != I within 1e-3)");
+            }
+        const double det = r0 * (r4 * r8 - r5 * r7) - r1 * (r3 * r8 - r5 * r6) + r2 * (r3 * r7 - r4 * r6);
+        if (std::abs(det - 1.0) > 1e-3)
+            throw std::invalid_argument("gimbal.mount_rotation must be right-handed (det = +1)");
+        tf2::Matrix3x3 mount_matrix(r0, r1, r2, r3, r4, r5, r6, r7, r8);
+        mount_matrix.getRotation(cfg.mount);
+        cfg.mount.normalize();
+        if (cfg.mount.w() < 0)
+            cfg.mount = tf2::Quaternion(-cfg.mount.x(), -cfg.mount.y(), -cfg.mount.z(), -cfg.mount.w());
+    }
 
     return cfg;
 }
@@ -575,6 +613,11 @@ void GimbalControl::run()
                     ctrl_op_type[i] = OP_TYPE_REAL_SPEED;
                     ctrl_op_value[i] = 0;
                 }
+                // 目标角 = 机身抬头角 + 相对角 (-90+pitch_aim, ROS FLU 域; 抬头域即
+                // 90-pitch_aim)。伺服比较域是 cam_angle (云台自身 IMU 的绝对俯仰,
+                // 安装无关的仰角域) —— 与安装旋转无关, 勿做 mount 关节换算 (2026-11-13
+                // 实测教训: 换算后目标 170°, 相机被推过顶到"水平朝后"顶住行程门)。
+                // mount 只进位姿融合 (gimbalCameraToWorld)。
                 const double target = aim_target_degrees[1] + aim_body_pitch_deg;
                 const double error = target - last_response.cam_angle[1] * 0.01; // 同抬头域
                 double speed = cfg.aim_follow_gain * error + body_rate_ff;
@@ -678,7 +721,8 @@ void GimbalControl::run()
 
                     if (!roll_hold_active)
                     {
-                        // 锁定+角度控制: op_value 单位 0.01deg
+                        // 锁定+角度控制: op_value 单位 0.01deg。LOCK+角度域为 cam
+                        // 姿态 (绝对俯仰, 安装无关), 不做 mount 换算。
                         ctrl_op_type[1] = OP_TYPE_ANGLE;
                         ctrl_op_value[1] = static_cast<int16_t>(cfg.pitch_hold_deg * 100.0f);
                     }
@@ -715,7 +759,7 @@ void GimbalControl::run()
                         r_ratio = 1.0f - std::abs(mtr_roll) / cfg.roll.max_deg;
                     }
 
-                    // 俯仰轴: P 控制器驱动相机姿态角回水平
+                    // 俯仰轴: P 控制器驱动相机姿态角回水平 (cam_angle 域, 安装无关)
                     if (cfg.pitch.present)
                     {
                         pitch_exp = (cfg.pitch_hold_deg - last_response.cam_angle[1] * 0.01f) * cfg.pitch_roll_speed_scale;
@@ -826,10 +870,13 @@ void GimbalControl::run()
                         // ZXY 链 (yaw*roll*pitch) 与协议附录2 欧拉序 Z→Y→X 同构
                         // (相机 LFD 系 -> FRD 基: Rz(ψ)*Rx(θ)*Ry(−φ)), 非 ZYX;
                         // 依据见 doc/gimbal_protocol_verified.md §3.1 (2026-11-08 修订)。
+                        // cfg.mount 为基座安装旋转 (gimbal.mount_rotation): 编码器
+                        // 关节角 -> 相机姿态必经此复合, 立装未配置时仰角系统性错
+                        // (2026-11-13 RK3576 <1kgF 根因)。
                         camera_orientation = apm_bridge::gimbalCameraToWorld(body_attitude,
                             {last_response.mtr_angle[1] * radians, -last_response.mtr_angle[0] * radians,
                              last_response.mtr_angle[2] * radians},
-                            {cfg.roll.present, cfg.pitch.present, cfg.yaw.present});
+                            {cfg.roll.present, cfg.pitch.present, cfg.yaw.present}, cfg.mount);
                         camera_heading = vehicle_heading;
                     }
                     // 陀螺域: cam_rate 是相机 LFD 系体轴角速度 (轴序 [X,Y,Z] = 俯仰/滚转/偏航,

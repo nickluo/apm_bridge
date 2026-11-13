@@ -198,6 +198,14 @@ struct GimbalConfig
     // 因此默认关闭，实机验证符号约定后再开启。
     bool send_uav_data = false;
 
+    // 云台基座安装旋转 (FRD 体坐标系, 参数 gimbal.mount_rotation 行主序 3x3,
+    // 默认单位阵): camera_to_body = mount * (关节链)。
+    // 只作用于位姿融合与 AirSim 运动学 (编码器 -> 相机姿态); AIM/HORIZON 伺服
+    // (cam_angle 绝对俯仰域) 与行程门控 (编码器域) 均与安装无关, 勿做换算
+    // (2026-11-13 实测教训: 对伺服目标做 mount 换算会把相机推过顶顶住行程门)。
+    // 当前真机立装值见 YAML (编码器零位相机朝机身上方, 三轮台架定案)。
+    tf2::Quaternion mount{0.0, 0.0, 0.0, 1.0};
+
     // 启动回中 (机械零点): 首次连接成功后以 FPV+角度 op=0 (编码器零点, 台架实测
     // mtr=-op 精确驱动, fl_sens=15) 主动把各轴编码器拉回机械零点; 各轴编码器进入
     // home_tolerance_deg 容差 (或 home_timeout_s 超时放行) 后才算 homed, 此前不

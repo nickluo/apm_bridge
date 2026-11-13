@@ -18,20 +18,26 @@ namespace apm_bridge
     // FRD basis is Rz(yaw)*Rx(roll)*Ry(pitch)
     // (theta -> +roll, -phi -> pitch-up, psi -> yaw). See
     // doc/gimbal_protocol_verified.md section 3.1 (2026-11-08 revision).
+    //
+    // mount: 云台基座在载机 FRD 下的固定安装旋转 (参数 gimbal.mount_rotation,
+    // 行主序 3x3, 默认单位阵): camera_to_body = mount * (关节链)。
     inline tf2::Quaternion gimbalCameraToWorld(const tf2::Quaternion &body_to_world,
-                                              const GimbalJointAngles &joints, const GimbalAxes &axes)
+                                              const GimbalJointAngles &joints, const GimbalAxes &axes,
+                                              const tf2::Quaternion &mount = tf2::Quaternion(0, 0, 0, 1))
     {
         const auto yaw = tf2::Quaternion(tf2::Vector3(0, 0, 1), axes[2] ? -joints[2] : 0);
         const auto roll = tf2::Quaternion(tf2::Vector3(1, 0, 0), axes[0] ? joints[0] : 0);
         const auto pitch = tf2::Quaternion(tf2::Vector3(0, 1, 0), axes[1] ? -joints[1] : 0);
-        return (body_to_world * yaw * roll * pitch).normalized();
+        return (body_to_world * mount * yaw * roll * pitch).normalized();
     }
 
     // ZXY virtual encoders avoid the +/-90-degree ZYX pitch fold (ZXY is also
     // the vendor euler order, see gimbalCameraToWorld above).
-    inline GimbalJointAngles gimbalJointAngles(const tf2::Quaternion &camera_to_body, const GimbalAxes &axes)
+    // mount 语义同上: 先除掉安装旋转 (mount^-1 * camera_to_body) 再分解关节角。
+    inline GimbalJointAngles gimbalJointAngles(const tf2::Quaternion &camera_to_body, const GimbalAxes &axes,
+                                               const tf2::Quaternion &mount = tf2::Quaternion(0, 0, 0, 1))
     {
-        const tf2::Matrix3x3 rotation(camera_to_body.normalized());
+        const tf2::Matrix3x3 rotation((mount.inverse() * camera_to_body).normalized());
         if (!axes[2])
             return {axes[0] ? std::atan2(rotation[2][1], rotation[1][1]) : 0,
                     axes[1] ? std::atan2(-rotation[0][2], rotation[0][0]) : 0, 0};

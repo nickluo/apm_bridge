@@ -356,6 +356,76 @@ namespace
         std::cout << "PASS: all-model joint rotation matrices, axis masks, roll singularities and pitch pole round-trips\n";
     }
 
+    void mountRotation()
+    {
+        const double radians = M_PI / 180;
+        tf2::Quaternion body;
+        body.setRPY(.4, -.3, 1.2);
+        const apm_bridge::GimbalAxes axes{true, true, true};
+        // 立装矩阵: 基座绕 FRD +Y 右旋 90°, 编码器零位相机朝机身上方 (-Z_FRD)
+        tf2::Matrix3x3 mount_up_matrix(0, 0, 1, 0, 1, 0, -1, 0, 0);
+        tf2::Quaternion mount_up;
+        mount_up_matrix.getRotation(mount_up);
+        mount_up.normalize();
+
+        // 1) 默认 mount (恒等) 与显式恒等 mount 逐位一致
+        const apm_bridge::GimbalJointAngles joints{-.6, .45, .8};
+        const auto plain = apm_bridge::gimbalCameraToWorld(body, joints, axes);
+        const auto identity_mount = apm_bridge::gimbalCameraToWorld(
+            body, joints, axes, tf2::Quaternion(0, 0, 0, 1));
+        require(std::abs(plain.dot(identity_mount)) > 1 - 1e-12,
+                "explicit identity mount differs from the default-argument pose");
+
+        // 2) mount 正反往返: 前向复合后逆解恢复关节角 (含反向 90° 与复合旋转)
+        tf2::Quaternion mount_down;
+        tf2::Matrix3x3(0, 0, -1, 0, 1, 0, 1, 0, 0).getRotation(mount_down);
+        mount_down.normalize();
+        tf2::Quaternion mount_compound;
+        tf2::Matrix3x3(mount_up_matrix * tf2::Matrix3x3(
+            std::cos(.5), -std::sin(.5), 0, std::sin(.5), std::cos(.5), 0, 0, 0, 1)
+        ).getRotation(mount_compound);
+        mount_compound.normalize();
+        for (const auto &mount : {mount_up, mount_down, mount_compound})
+        {
+            const auto pose = apm_bridge::gimbalCameraToWorld(body, joints, axes, mount);
+            const auto recovered = apm_bridge::gimbalJointAngles(body.inverse() * pose, axes, mount);
+            const auto rebuilt = apm_bridge::gimbalCameraToWorld(body, recovered, axes, mount);
+            require(std::abs(pose.dot(rebuilt)) > 1 - 1e-10,
+                    "mount-aware encoder decomposition lost the pose");
+        }
+
+        // 3) 复合序不变量: 零关节 + 水平机体 => 位姿恰为安装旋转本身
+        //    (立装矩阵下, 编码器零位的融合光轴 = mount 的 X 轴方向)
+        const auto zero_pose = apm_bridge::gimbalCameraToWorld(
+            tf2::Quaternion(0, 0, 0, 1), {0, 0, 0}, axes, mount_up);
+        require(std::abs(zero_pose.dot(mount_up)) > 1 - 1e-9,
+                "zero joints must compose to the bare mount rotation");
+
+        // 5) 参数校验: 尺寸/正交性/右手性拒绝
+        const auto make_node = [](const std::vector<double> &matrix) {
+            rclcpp::NodeOptions options;
+            options.parameter_overrides({rclcpp::Parameter(
+                "gimbal.mount_rotation", matrix)});
+            return std::make_shared<rclcpp::Node>("mount_param_test", options);
+        };
+        const std::vector<double> valid{0, 0, 1, 0, 1, 0, -1, 0, 0};
+        xfrobot::GimbalConfig::fromParameters(*make_node(valid));
+        for (const auto &bad : std::vector<std::vector<double>>{
+                 {1, 0, 0, 0, 1, 0},                            // 尺寸错
+                 {1, 0, 0, 0, 2, 0, 0, 0, 1},                   // 非正交 (缩放)
+                 {1, 0, 0, 0, 1, 0, 0, 0, -1}})                 // 反射 (det=-1)
+            try
+            {
+                xfrobot::GimbalConfig::fromParameters(*make_node(bad));
+                require(false, "invalid mount_rotation was accepted");
+            }
+            catch (const std::invalid_argument &)
+            {
+            }
+        std::cout << "PASS: mount rotation identity default, round-trips, composition invariant "
+                     "and parameter validation\n";
+    }
+
     void hardwarePose(xfrobot::GimbalModel model)
     {
         SerialGimbalSimulator simulator;
@@ -1422,6 +1492,7 @@ int main(int argc, char **argv)
         aimAndMissionLimits();
         strapdownBackend();
         jointKinematics();
+        mountRotation();
         bodyRatePropagation();
         skewAlignedComposition();
         for (const auto model : {xfrobot::GimbalModel::C20S, xfrobot::GimbalModel::C40D, xfrobot::GimbalModel::C200T})

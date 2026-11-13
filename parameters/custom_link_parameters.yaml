@@ -97,6 +97,19 @@ custom_link_bridge:
 
     gimbal:
       mission_on_ground: true # 在地面时是否允许执行任务
+      # ---- 基座安装旋转 (行主序 3x3, FRD 体坐标系; 默认单位阵 = 基座与机身对齐) ----
+      # 定义"编码器零位时云台基座相对机身"的固定安装角: camera_to_body =
+      # mount * (关节链)。只作用于位姿融合 (/fpv/gimbal, 编码器 -> 相机姿态) 与
+      # AirSim 运动学; AIM/HORIZON 伺服 (cam_angle 绝对俯仰域) 与行程门控 (编码器域)
+      # 均与安装无关, 不做换算。
+      # 当前真机立装定案 (2026-11-13 三轮台架验证): 编码器零位相机朝机身上方;
+      # 对准 ~80° 上仰目标时融合光轴 asin(2(x·z - w·y)) 读 +73° (残差 ~7° 为
+      # 编码器-IMU 域偏置, 需要时用 pitch_aim 吸收)。回中位相机朝上 = 快速自检锚点。
+      # 注意: ①元素必须写浮点字面量 (整数会被 YAML 解析成 integer_array, 与
+      # double 声明冲突, 启动即崩); ②校验正交 + det=+1, 否则节点拒绝启动。
+      mount_rotation: [ 0.0, 0.0, -1.0,
+                        0.0, 1.0, 0.0,
+                        1.0, 0.0, 0.0]
       # ---- 启动回中 (机械零点) ----
       # 首次连接成功后先触发 go_zero 回中 (锁定+零速等待固件动作), 各轴编码器
       # 进入 home_tolerance_deg 容差或 home_timeout_s 超时后才进入 AIM 等模式;
@@ -122,7 +135,7 @@ custom_link_bridge:
       # 仅作编码器角度门控与 AIM 目标钳制, 与姿态角保持值无关。
       # roll_travel_min: -50.0    # deg
       # roll_travel_max: 50.0
-      pitch_travel_min: -40.0
+      pitch_travel_min: -110.0
       pitch_travel_max: 110.0
       # yaw_travel_min: 0.0
       # yaw_travel_max: 0.0

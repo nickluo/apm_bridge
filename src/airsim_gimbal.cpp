@@ -212,8 +212,10 @@ namespace custom_link_bridge
                     const auto body_ned = readQuaternion(vehicle_pose);
                     const auto body = nedToEnu(body_ned);
                     const apm_bridge::GimbalAxes axes{cfg_.roll.present, cfg_.pitch.present, cfg_.yaw.present};
+                    // 安装旋转与真机位姿链一致 (gimbal.mount_rotation): 测量位姿
+                    // 向关节流形投影时同乘/同除 mount。
                     enu = apm_bridge::gimbalCameraToWorld(body,
-                        apm_bridge::gimbalJointAngles(body.inverse() * enu, axes), axes);
+                        apm_bridge::gimbalJointAngles(body.inverse() * enu, axes, cfg_.mount), axes, cfg_.mount);
                     if (!mount_position)
                         mount_position = tf2::quatRotate(body_ned.inverse(),
                             readPosition(pose) - readPosition(vehicle_pose));
@@ -221,7 +223,7 @@ namespace custom_link_bridge
                     const double elapsed = control_time - last_control_time;
                     const double dt = std::clamp(elapsed, 0.0, 0.1);
                     last_control_time = control_time;
-                    auto measured_joints = apm_bridge::gimbalJointAngles(body.inverse() * enu, axes);
+                    auto measured_joints = apm_bridge::gimbalJointAngles(body.inverse() * enu, axes, cfg_.mount);
                     for (auto &value : measured_joints)
                         value *= 180 / M_PI;
                     if (!trajectory_ready || elapsed <= 0 || elapsed > .3)
@@ -287,7 +289,8 @@ namespace custom_link_bridge
                         trajectory.reset(measured_joints);
                         relative = body.inverse() * enu;
                     }
-                    auto target_joints = apm_bridge::gimbalJointAngles(relative, axes);
+                    // 期望为机身系相机姿态; 安装旋转在此换算成关节目标 (恒等安装不变)
+                    auto target_joints = apm_bridge::gimbalJointAngles(relative, axes, cfg_.mount);
                     for (size_t i = 0; i < target_joints.size(); ++i)
                     {
                         target_joints[i] *= 180 / M_PI;
@@ -328,7 +331,7 @@ namespace custom_link_bridge
                         trajectory.constrain(i, limits[i].min_deg, limits[i].max_deg);
                         target_joints[i] = trajectory.positions()[i] * M_PI / 180;
                     }
-                    relative = apm_bridge::gimbalCameraToWorld(tf2::Quaternion(0, 0, 0, 1), target_joints, axes);
+                    relative = apm_bridge::gimbalCameraToWorld(tf2::Quaternion(0, 0, 0, 1), target_joints, axes, cfg_.mount);
                     if (mode == apm_bridge::GimbalMode::MISSION)
                         mission_world = body * relative;
                     const auto frd = enuRelativeToFrd(relative);
